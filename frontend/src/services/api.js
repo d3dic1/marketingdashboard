@@ -2,17 +2,18 @@ import axios from 'axios';
 import { auth } from './firebase';
 
 // Use Cloud Run URL directly since Firebase proxy has permission issues
-const getBaseURL = () => {
-  if (process.env.NODE_ENV === 'production') {
-    // Use the Cloud Run service URL
-    return 'https://email-backend-795377592827.us-central1.run.app/api';
+const getApiUrl = () => {
+  // Check if we're in production (deployed environment)
+  if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+    // In production, use the deployed backend URL
+    return 'https://your-backend-url.com/api'; // Replace with your actual backend URL
   }
   // In development, use localhost backend
   return 'http://localhost:5001/api';
 };
 
 const api = axios.create({
-  baseURL: getBaseURL(),
+  baseURL: getApiUrl(),
   headers: {
     'Content-Type': 'application/json',
   },

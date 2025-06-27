@@ -456,6 +456,79 @@ Format as valid JSON with clear, actionable insights.
     
     return `${minDate.toISOString().split('T')[0]} to ${maxDate.toISOString().split('T')[0]}`;
   }
+
+  // New method to process CSV content directly from memory
+  async processCSVContentAndOrganizeSheets(csvContent, filename) {
+    const startTime = Date.now();
+    
+    try {
+      logger.info('Starting CSV content processing and sheet organization');
+
+      // Parse CSV data from content
+      const csvData = await this.parseCSVContent(csvContent);
+      
+      if (!csvData || csvData.length === 0) {
+        throw new Error('No data found in CSV content');
+      }
+
+      logger.info('CSV parsed successfully:', { recordCount: csvData.length });
+
+      // Analyze data structure with AI
+      const analysis = await this.analyzeDataStructure(csvData);
+      
+      // Organize data by AI recommendations
+      const organizedData = await this.organizeDataByAI(csvData, analysis);
+      
+      // Create sheets based on organization
+      const sheetResults = await this.createSheetsFromData(organizedData);
+      
+      // Generate AI insights
+      const insights = await this.generateInsights(csvData, analysis);
+      
+      // Create summary sheet
+      const processingTime = ((Date.now() - startTime) / 1000).toFixed(2);
+      const summaryData = {
+        totalRecords: csvData.length,
+        dateRange: this.getDateRange(csvData),
+        sheetsCreated: sheetResults.length,
+        processingTime: `${processingTime}s`,
+        aiInsights: insights.summary,
+        filename: filename
+      };
+
+      await this.sheetsService.createSummarySheet(summaryData);
+
+      return {
+        success: true,
+        totalRecords: csvData.length,
+        sheetsCreated: sheetResults.length,
+        processingTime: `${processingTime}s`,
+        insights: insights,
+        spreadsheetUrl: await this.sheetsService.getSpreadsheetUrl()
+      };
+
+    } catch (error) {
+      logger.error('Error processing CSV content and organizing sheets:', error);
+      throw error;
+    }
+  }
+
+  // New method to parse CSV content from string
+  async parseCSVContent(csvContent) {
+    return new Promise((resolve, reject) => {
+      const results = [];
+      
+      // Create a readable stream from the string content
+      const { Readable } = require('stream');
+      const stream = Readable.from(csvContent);
+      
+      stream
+        .pipe(csv())
+        .on('data', (data) => results.push(data))
+        .on('end', () => resolve(results))
+        .on('error', (error) => reject(error));
+    });
+  }
 }
 
 module.exports = PacingService; 

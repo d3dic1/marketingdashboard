@@ -7,20 +7,8 @@ const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadDir = path.join(__dirname, '../../uploads');
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, 'pacing-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
+// Configure multer for file uploads - use memory storage for Netlify
+const storage = multer.memoryStorage();
 
 const upload = multer({
   storage: storage,
@@ -62,12 +50,12 @@ router.post('/upload-csv', upload.single('csvFile'), async (req, res) => {
 
     logger.info('Processing CSV file:', {
       filename: req.file.originalname,
-      size: req.file.size,
-      path: req.file.path
+      size: req.file.size
     });
 
-    // Process the CSV file
-    const result = await pacingService.processCSVAndOrganizeSheets(req.file.path);
+    // Convert buffer to string and process
+    const csvContent = req.file.buffer.toString('utf-8');
+    const result = await pacingService.processCSVContentAndOrganizeSheets(csvContent, req.file.originalname);
     
     res.json({
       success: true,
@@ -77,11 +65,6 @@ router.post('/upload-csv', upload.single('csvFile'), async (req, res) => {
 
   } catch (error) {
     logger.error('Error processing CSV file:', error);
-    
-    // Clean up uploaded file if it exists
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
     
     res.status(500).json({ 
       error: 'Failed to process CSV file',
@@ -144,11 +127,9 @@ router.post('/test-csv', upload.single('csvFile'), async (req, res) => {
       size: req.file.size
     });
 
-    // Just parse the CSV to test
-    const csvData = await pacingService.parseCSV(req.file.path);
-    
-    // Clean up test file
-    fs.unlinkSync(req.file.path);
+    // Convert buffer to string and parse CSV
+    const csvContent = req.file.buffer.toString('utf-8');
+    const csvData = await pacingService.parseCSVContent(csvContent);
 
     res.json({
       success: true,
@@ -160,11 +141,6 @@ router.post('/test-csv', upload.single('csvFile'), async (req, res) => {
 
   } catch (error) {
     logger.error('Error testing CSV file:', error);
-    
-    // Clean up test file if it exists
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
     
     res.status(500).json({ 
       error: 'Failed to parse CSV file',
