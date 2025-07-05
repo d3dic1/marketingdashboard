@@ -33,12 +33,7 @@ const features = [
     icon: <Zap size={32} className="text-accent" />,
     to: '/smart-automation',
   },
-  {
-    title: 'Audience Intelligence',
-    description: 'Predictive segmentation, churn prediction, engagement scoring, personas.',
-    icon: <Users size={32} className="text-accent" />,
-    to: '/audience-intelligence',
-  },
+
   {
     title: 'Advanced Analytics',
     description: 'Anomaly detection, ROI prediction, A/B test optimizer, trend analysis.',

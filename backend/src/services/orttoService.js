@@ -9,12 +9,12 @@ class OrttoService {
     this.apiKey = process.env.ORTTO_API_KEY;
     this.instanceId = process.env.ORTTO_INSTANCE_ID;
     
-    // Rate limiting configuration
+    // Rate limiting configuration - more conservative to prevent 429 errors
     this.requestQueue = [];
     this.isProcessing = false;
     this.lastRequestTime = 0;
-    this.minRequestInterval = 1000; // 1 second between requests (reduced from 3 seconds)
-    this.maxRequestsPerMinute = 20; // Increased to 20 requests per minute (from 10)
+    this.minRequestInterval = 2000; // 2 seconds between requests (increased from 1 second)
+    this.maxRequestsPerMinute = 15; // Reduced to 15 requests per minute (from 20)
     this.requestCount = 0;
     this.lastResetTime = Date.now();
 
@@ -62,11 +62,14 @@ class OrttoService {
   async makeApiRequest(endpoint, requestBody, maxRetries = 3) {
     const url = `${this.baseURL}${endpoint}`;
     
+    // Sanitize API key to remove any invalid characters
+    const sanitizedApiKey = this.apiKey ? this.apiKey.trim().replace(/[^\x20-\x7E]/g, '') : '';
+    
     const config = {
       method: 'POST',
       url: url,
       headers: {
-        'X-API-Key': this.apiKey,
+        'X-API-Key': sanitizedApiKey,
         'Content-Type': 'application/json'
       },
       data: requestBody
@@ -93,13 +96,40 @@ class OrttoService {
     this.cache.set(key, { data, timestamp: Date.now() });
   }
 
+  clearCache() {
+    logger.info('Clearing OrttoService cache due to rate limiting');
+    this.cache.clear();
+  }
+
+  getRateLimitStatus() {
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastRequestTime;
+    const timeSinceReset = now - this.lastResetTime;
+    const requestsThisMinute = this.requestCount;
+    
+    return {
+      isProcessing: this.isProcessing,
+      queueLength: this.requestQueue.length,
+      timeSinceLastRequest,
+      timeSinceReset,
+      requestsThisMinute,
+      maxRequestsPerMinute: this.maxRequestsPerMinute,
+      minRequestInterval: this.minRequestInterval,
+      canMakeRequest: timeSinceLastRequest >= this.minRequestInterval && requestsThisMinute < this.maxRequestsPerMinute
+    };
+  }
+
   async executeGetRequest(endpoint, params) {
     const url = `${this.baseURL}${endpoint}`;
+    
+    // Sanitize API key to remove any invalid characters
+    const sanitizedApiKey = this.apiKey ? this.apiKey.trim().replace(/[^\x20-\x7E]/g, '') : '';
+    
     const config = {
       method: 'GET',
       url: url,
       headers: {
-        'X-API-Key': this.apiKey,
+        'X-API-Key': sanitizedApiKey,
       },
       params: params,
     };
@@ -178,6 +208,44 @@ class OrttoService {
     }
   }
 
+  async getCampaignInfo(campaignId) {
+    const cacheKey = this.getCacheKey('campaign_info', campaignId);
+    const cachedInfo = this.getFromCache(cacheKey);
+    if (cachedInfo) {
+      logger.info(`Using cached campaign info for ${campaignId}: ${cachedInfo.name}`);
+      return cachedInfo;
+    }
+    try {
+      const endpoint = '/v1/campaign/get-all';
+      const requestBody = { campaign_ids: [campaignId] };
+      logger.info(`Fetching campaign info for ${campaignId} with POST to ${endpoint} and body:`, requestBody);
+      // Use makeRequest instead of makeApiRequest to get rate limiting
+      const response = await this.makeRequest(endpoint, requestBody);
+      logger.info(`Campaign info response:`, response);
+      if (response && Array.isArray(response.campaigns) && response.campaigns.length > 0) {
+        const campaign = response.campaigns[0];
+        const campaignInfo = {
+          id: campaignId,
+          name: campaign.name || `Campaign ${campaignId}`,
+          type: campaign.type || 'campaign',
+          created_at: campaign.created_at,
+          updated_at: campaign.updated_at
+        };
+        this.setCache(cacheKey, campaignInfo);
+        logger.info(`Found campaign info: ${campaignInfo.name}`);
+        return campaignInfo;
+      }
+    } catch (error) {
+      logger.error(`Error fetching campaign info for ${campaignId}:`, {
+        message: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+        statusText: error.response?.statusText
+      });
+    }
+    return { id: campaignId, name: `Campaign ${campaignId}` };
+  }
+
   async fetchReport(campaignId, timeframe = 'all-time') {
     const cacheKey = this.getCacheKey('campaign', campaignId, timeframe);
     const cached = this.getFromCache(cacheKey);
@@ -187,29 +255,82 @@ class OrttoService {
       const requestBody = {
         campaign_id: campaignId
       };
-      // Only add timeframe if it's not 'all-time', as omitting it might default to all-time stats
       if (timeframe !== 'all-time') {
         requestBody.timeframe = timeframe;
       }
-      const reportData = await this.makeApiRequest(endpoint, requestBody);
+      const reportData = await this.makeRequest(endpoint, requestBody);
 
-      // Check if we have the expected data structure
-      if (!reportData || !reportData.reports || !reportData.reports.performance) {
-        logger.error('Invalid response format:', reportData);
-        throw new Error('Invalid response format from API');
+      // Defensive: If API returns nothing or invalid, return a default report
+      if (!reportData || !reportData.reports) {
+        logger.error('Invalid or empty response from API, returning default report:', reportData);
+        const campaignName = `Campaign ${campaignId}`;
+        const mappedReport = {
+          name: campaignName,
+          opens: 0,
+          clicks: 0,
+          deliveries: 0,
+          bounces: 0,
+          unsubscribes: 0,
+          spam_reports: 0,
+          unique_opens: 0,
+          unique_clicks: 0,
+          total_recipients: 0,
+          invalid: 0,
+          forwarded: 0,
+          reacted: 0,
+          replied: 0,
+          viewed_online: 0
+        };
+        this.setCache(cacheKey, mappedReport);
+        return mappedReport;
       }
 
-      const performance = reportData.reports.performance;
+      let performance = null;
+      if (reportData.report_type === 'conversions') {
+        logger.info(`Skipping 'conversions' report for campaign ${campaignId}`);
+        return null;
+      } else if (reportData.reports.performance) {
+        performance = reportData.reports.performance;
+      }
 
-      // Try to get the name from the report, otherwise from cache
       let campaignName = reportData.campaign_name;
-      
       if (!campaignName) {
         const cacheKey = this.getCacheKey('name', campaignId);
-        campaignName = this.getFromCache(cacheKey) || `Campaign ${campaignId}`;
+        campaignName = this.getFromCache(cacheKey);
+      }
+      if (!campaignName) {
+        try {
+          const campaignInfo = await this.getCampaignInfo(campaignId);
+          campaignName = campaignInfo.name;
+        } catch (e) {
+          campaignName = `Campaign ${campaignId}`;
+        }
       }
 
-      // Map the response to our expected format
+      // If no performance data found, return a default report
+      if (!performance) {
+        logger.warn(`Unknown or unsupported report type for campaign ${campaignId}: ${reportData.report_type}, returning default report`);
+        const mappedReport = {
+          name: campaignName,
+          opens: 0,
+          clicks: 0,
+          deliveries: 0,
+          bounces: 0,
+          unsubscribes: 0,
+          spam_reports: 0,
+          unique_opens: 0,
+          unique_clicks: 0,
+          total_recipients: 0,
+          invalid: 0,
+          forwarded: 0,
+          reacted: 0,
+          replied: 0,
+          viewed_online: 0
+        };
+        this.setCache(cacheKey, mappedReport);
+        return mappedReport;
+      }
+
       const mappedReport = {
         name: campaignName,
         opens: performance.opens || 0,
@@ -231,7 +352,8 @@ class OrttoService {
       logger.info('Mapped report with name:', {
         campaignId,
         name: mappedReport.name,
-        hasName: !!mappedReport.name
+        hasName: !!mappedReport.name,
+        reportType: reportData.report_type || 'performance'
       });
       this.setCache(cacheKey, mappedReport);
       return mappedReport;
@@ -244,7 +366,27 @@ class OrttoService {
         status: error.response?.status,
         statusText: error.response?.statusText
       });
-      throw error;
+      // On error, return a default report
+      const campaignName = `Campaign ${campaignId}`;
+      const mappedReport = {
+        name: campaignName,
+        opens: 0,
+        clicks: 0,
+        deliveries: 0,
+        bounces: 0,
+        unsubscribes: 0,
+        spam_reports: 0,
+        unique_opens: 0,
+        unique_clicks: 0,
+        total_recipients: 0,
+        invalid: 0,
+        forwarded: 0,
+        reacted: 0,
+        replied: 0,
+        viewed_online: 0
+      };
+      this.setCache(cacheKey, mappedReport);
+      return mappedReport;
     }
   }
 
@@ -267,7 +409,8 @@ class OrttoService {
       }
 
       logger.info(`Fetching journey report for ${campaignId} with body:`, requestBody);
-      const reportData = await this.makeApiRequest(endpoint, requestBody);
+      // Use makeRequest instead of makeApiRequest to get rate limiting
+      const reportData = await this.makeRequest(endpoint, requestBody);
 
       if (!reportData || !reportData.reports) {
         logger.error('Invalid response format (journey):', reportData);
@@ -377,6 +520,9 @@ class OrttoService {
   }
 
   async makeRequest(endpoint, params = {}) {
+    const status = this.getRateLimitStatus();
+    logger.info(`Queueing request to ${endpoint}. Rate limit status:`, status);
+    
     return new Promise((resolve, reject) => {
       this.requestQueue.push({ endpoint, params, resolve, reject });
       this.processQueue();
@@ -431,9 +577,24 @@ class OrttoService {
       } catch (error) {
         // Handle 429 errors with exponential backoff
         if (error.response?.status === 429) {
-          const retryAfter = error.response.headers['retry-after'] || 60;
-          const waitTime = parseInt(retryAfter) * 1000;
+          // Try to get the retry time from the response body first
+          let retryAfter = 60; // default 60 seconds
+          
+          if (error.response?.data?.details?.['try-in-seconds']) {
+            retryAfter = error.response.data.details['try-in-seconds'];
+            logger.info(`Rate limited (429). API suggests waiting ${retryAfter} seconds`);
+          } else if (error.response?.headers?.['retry-after']) {
+            retryAfter = parseInt(error.response.headers['retry-after']);
+            logger.info(`Rate limited (429). Header suggests waiting ${retryAfter} seconds`);
+          } else {
+            logger.info(`Rate limited (429). Using default wait time of ${retryAfter} seconds`);
+          }
+          
+          const waitTime = retryAfter * 1000;
           logger.info(`Rate limited (429). Waiting ${waitTime}ms before retry...`);
+          
+          // Clear cache when rate limited to avoid serving stale data
+          this.clearCache();
           
           // Put the request back in the queue after waiting
           setTimeout(() => {
@@ -479,15 +640,18 @@ class OrttoService {
   async executeRequest(endpoint, requestBody) {
     const url = `${this.baseURL}${endpoint}`;
     
+    // Sanitize API key to remove any invalid characters
+    const sanitizedApiKey = this.apiKey ? this.apiKey.trim().replace(/[^\x20-\x7E]/g, '') : '';
+    
     const config = {
       method: 'POST',
       url: url,
       headers: {
-        'X-API-Key': this.apiKey,
+        'X-API-Key': sanitizedApiKey,
         'Content-Type': 'application/json'
       },
       data: requestBody,
-      timeout: 30000 // 30 second timeout
+      timeout: 60000 // Increase timeout to 60 seconds for batch processing
     };
 
     logger.info(`Executing API request to ${endpoint}`);
@@ -601,6 +765,12 @@ class OrttoService {
         requestBody.sort_order = filters.sort_order; // 'asc' or 'desc'
       }
       
+      // If requestBody is still empty, set a default limit to avoid 400 error
+      if (Object.keys(requestBody).length === 0) {
+        requestBody.limit = 50;
+      }
+      logger.info('Request body for /v1/campaign/get-all:', requestBody);
+      
       const response = await this.makeApiRequest(endpoint, requestBody);
       
       logger.info(`Successfully exported campaigns. Found ${response?.campaigns?.length || 0} campaigns.`);
@@ -712,7 +882,8 @@ class OrttoService {
         campaign_id: journeyId
       };
       
-      const response = await this.makeApiRequest(endpoint, requestBody);
+      // Use makeRequest instead of makeApiRequest to get rate limiting
+      const response = await this.makeRequest(endpoint, requestBody);
       
       if (response && response.campaign) {
         const journeyInfo = {
@@ -835,7 +1006,8 @@ class OrttoService {
         campaign_id: assetId
       };
       
-      const response = await this.makeApiRequest(endpoint, requestBody);
+      // Use makeRequest instead of makeApiRequest to get rate limiting
+      const response = await this.makeRequest(endpoint, requestBody);
       
       if (response && response.campaign) {
         const assetType = {

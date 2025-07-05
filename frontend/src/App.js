@@ -7,7 +7,7 @@ import AIPacingEditor from './pages/AIPacingEditor';
 import GoogleAnalytics from './pages/GoogleAnalytics';
 import CampaignReports from './pages/CampaignReports';
 import JourneyReports from './pages/JourneyReports';
-import AudienceIntelligence from './pages/AudienceIntelligence';
+
 import SmartRecommendations from './pages/SmartRecommendations';
 import AIStudio from './pages/AIStudio';
 import AIBlogCreator from './pages/AIBlogCreator';
@@ -63,7 +63,7 @@ function App() {
                         <Route path="/visual-content/infographic" element={<InfographicCreator />} />
                         <Route path="/visual-content/video-script" element={<VideoScriptGenerator />} />
                         <Route path="/visual-content/landing-page" element={<LandingPageCopy />} />
-                        <Route path="/audience-intelligence" element={<AudienceIntelligence />} />
+
                         <Route path="/google-analytics" element={<GoogleAnalytics />} />
                         <Route path="/campaign-reports" element={<CampaignReports />} />
                         <Route path="/journey-reports" element={<JourneyReports />} />

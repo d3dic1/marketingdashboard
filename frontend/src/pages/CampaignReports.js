@@ -5,13 +5,13 @@ import AutoDiscovery from '../components/AutoDiscovery';
 import api, { setAuthToken, authorizedRequest } from '../services/api';
 import { useAuth } from '../services/firebase';
 
-const LOAD_LIMIT_OPTIONS = [10, 20, 30, 40, 50];
+const LOAD_LIMIT_OPTIONS = [10, 20, 30, 40, 50, 75, 100];
 
 const CampaignReports = () => {
   const [isManagerOpen, setIsManagerOpen] = useState(false);
   const [isAutoDiscoveryOpen, setIsAutoDiscoveryOpen] = useState(false);
   const [campaignIds, setCampaignIds] = useState([]);
-  const [maxItems, setMaxItems] = useState(20); // Default to 20
+  const [maxItems, setMaxItems] = useState(50); // Default to 50
   const { user } = useAuth();
 
   // Load campaign IDs from backend or localStorage on mount

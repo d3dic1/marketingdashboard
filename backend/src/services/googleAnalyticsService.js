@@ -67,8 +67,41 @@ class GoogleAnalyticsService {
         const orttoData = await this.fetchOrttoSpecificData(targetPropertyId, startDate, endDate);
         return orttoData;
       } catch (orttoError) {
-        logger.warn('Could not fetch Ortto-specific data, falling back to general analytics:', orttoError.message);
-        return await this.fetchGeneralAnalyticsData(targetPropertyId, startDate, endDate);
+        logger.warn('Could not fetch Ortto-specific data:', orttoError.message);
+        
+        // Try to discover what source/medium combinations are available to help the user
+        try {
+          const availableCombinations = await this.discoverSourceMediumCombinations(targetPropertyId, startDate, endDate);
+          logger.info('Available source/medium combinations for debugging:', availableCombinations.slice(0, 10));
+          
+          return {
+            success: true,
+            data: { dailyData: [], totals: {} },
+            summary: { note: 'No Ortto data found for this property.' },
+            dateRange: { startDate, endDate },
+            propertyId: targetPropertyId,
+            note: `No Ortto data found for this property. Available source/medium combinations: ${availableCombinations.slice(0, 5).map(c => c.sourceMedium).join(', ')}...`,
+            debug: {
+              availableSourceMediums: availableCombinations.slice(0, 10),
+              error: orttoError.message
+            }
+          };
+        } catch (discoveryError) {
+          logger.warn('Failed to discover source/medium combinations for debugging:', discoveryError.message);
+          
+          return {
+            success: true,
+            data: { dailyData: [], totals: {} },
+            summary: { note: 'No Ortto data found for this property.' },
+            dateRange: { startDate, endDate },
+            propertyId: targetPropertyId,
+            note: 'No Ortto data found for this property. Unable to discover available source/medium combinations.',
+            debug: {
+              error: orttoError.message,
+              discoveryError: discoveryError.message
+            }
+          };
+        }
       }
 
     } catch (error) {
@@ -83,11 +116,64 @@ class GoogleAnalyticsService {
   }
 
   async fetchOrttoSpecificData(propertyId, startDate, endDate) {
-    // Try different approaches to get Ortto-specific data
+    // First, let's discover what source/medium combinations are available
     try {
-      logger.info('Testing firstUserSourceMedium dimension compatibility...');
+      logger.info('Discovering available source/medium combinations...');
+      const availableCombinations = await this.discoverSourceMediumCombinations(propertyId, startDate, endDate);
+      
+      // Look for Ortto-related combinations
+      const orttoCombinations = availableCombinations.filter(combo => 
+        combo.sourceMedium.toLowerCase().includes('ortto') ||
+        combo.sourceMedium.toLowerCase().includes('email') ||
+        combo.sourceMedium.toLowerCase().includes('mail')
+      );
+      
+      logger.info('Found Ortto-related combinations:', orttoCombinations);
+      
+      if (orttoCombinations.length > 0) {
+        // Use the first Ortto combination found
+        const orttoSourceMedium = orttoCombinations[0].sourceMedium;
+        logger.info(`Using Ortto source/medium: ${orttoSourceMedium}`);
+        
+        return await this.fetchDataBySourceMedium(propertyId, startDate, endDate, orttoSourceMedium);
+      }
+    } catch (discoveryError) {
+      logger.warn('Failed to discover source/medium combinations:', discoveryError.message);
+    }
 
-      const [testResponse] = await this.analyticsDataClient.runReport({
+    // Fallback: Try common Ortto source/medium patterns
+    const orttoPatterns = [
+      'ortto / email',
+      'ortto/email',
+      'ortto / mail',
+      'ortto/mail',
+      'email',
+      'mail'
+    ];
+
+    for (const pattern of orttoPatterns) {
+      try {
+        logger.info(`Trying Ortto pattern: ${pattern}`);
+        const data = await this.fetchDataBySourceMedium(propertyId, startDate, endDate, pattern);
+        if (data && data.success && data.data.dailyData.length > 0) {
+          logger.info(`Successfully found data with pattern: ${pattern}`);
+          return data;
+        }
+      } catch (error) {
+        logger.warn(`Pattern ${pattern} failed:`, {
+          pattern,
+          error: error.message,
+          propertyId,
+          startDate,
+          endDate
+        });
+      }
+    }
+
+    // If no Ortto-specific data found, try to get any email-related data
+    try {
+      logger.info('Trying to fetch any email-related data...');
+      const [emailResponse] = await this.analyticsDataClient.runReport({
         property: `properties/${propertyId}`,
         dateRanges: [{ startDate, endDate }],
         dimensions: [
@@ -104,29 +190,70 @@ class GoogleAnalyticsService {
           filter: {
             fieldName: 'firstUserSourceMedium',
             stringFilter: {
-              matchType: 'EXACT',
-              value: 'ortto / email',
+              matchType: 'CONTAINS',
+              value: 'email',
             },
           },
         },
       });
 
-      logger.info('firstUserSourceMedium dimension test successful:', {
-        rowCount: testResponse.rows?.length || 0,
-        hasData: testResponse.rows && testResponse.rows.length > 0
-      });
-
-      if (testResponse.rows && testResponse.rows.length > 0) {
-        // We have Ortto data! Now try to get additional metrics including shopify_app_install
-        return this.processOrttoData(testResponse, propertyId, startDate, endDate);
-      } else {
-        logger.warn('No Ortto data found with firstUserSourceMedium dimension');
-        throw new Error('No Ortto data found');
+      if (emailResponse.rows && emailResponse.rows.length > 0) {
+        logger.info('Found email-related data:', {
+          rowCount: emailResponse.rows.length,
+          sampleSourceMedium: emailResponse.rows[0]?.dimensionValues[1]?.value
+        });
+        return this.processOrttoData(emailResponse, propertyId, startDate, endDate);
       }
+    } catch (emailError) {
+      logger.warn('Failed to fetch email-related data:', {
+        error: emailError.message,
+        stack: emailError.stack,
+        propertyId,
+        startDate,
+        endDate
+      });
+    }
 
-    } catch (error) {
-      logger.warn('firstUserSourceMedium dimension approach failed:', error.message);
-      throw new Error(`Ortto-specific approach failed: ${error.message}`);
+    // If all else fails, throw an error
+    throw new Error('No Ortto or email-related data found in this GA4 property. Please check your tracking setup.');
+  }
+
+  async fetchDataBySourceMedium(propertyId, startDate, endDate, sourceMedium) {
+    logger.info(`Fetching data for source/medium: ${sourceMedium}`);
+
+    const [response] = await this.analyticsDataClient.runReport({
+      property: `properties/${propertyId}`,
+      dateRanges: [{ startDate, endDate }],
+      dimensions: [
+        { name: 'date' },
+        { name: 'firstUserSourceMedium' }
+      ],
+      metrics: [
+        { name: 'eventCount' },
+        { name: 'sessions' },
+        { name: 'engagedSessions' },
+        { name: 'totalUsers' }
+      ],
+      dimensionFilter: {
+        filter: {
+          fieldName: 'firstUserSourceMedium',
+          stringFilter: {
+            matchType: 'EXACT',
+            value: sourceMedium,
+          },
+        },
+      },
+    });
+
+    if (response.rows && response.rows.length > 0) {
+      logger.info(`Successfully fetched data for ${sourceMedium}:`, {
+        rowCount: response.rows.length,
+        hasData: true
+      });
+      return this.processOrttoData(response, propertyId, startDate, endDate);
+    } else {
+      logger.warn(`No data found for source/medium: ${sourceMedium}`);
+      throw new Error(`No data found for source/medium: ${sourceMedium}`);
     }
   }
 
@@ -188,6 +315,35 @@ class GoogleAnalyticsService {
     try {
       logger.info('Discovering source/medium combinations in GA4 data...');
 
+      // First, let's test if we can access the property at all with a simple request
+      try {
+        const [testResponse] = await this.analyticsDataClient.runReport({
+          property: `properties/${propertyId}`,
+          dateRanges: [{ startDate, endDate }],
+          dimensions: [
+            { name: 'date' }
+          ],
+          metrics: [
+            { name: 'eventCount' }
+          ],
+          limit: 1
+        });
+        
+        logger.info('Basic GA4 API test successful:', {
+          hasData: testResponse.rows && testResponse.rows.length > 0,
+          rowCount: testResponse.rows?.length || 0
+        });
+      } catch (testError) {
+        logger.error('Basic GA4 API test failed:', {
+          error: testError.message,
+          stack: testError.stack,
+          propertyId,
+          startDate,
+          endDate
+        });
+        throw testError;
+      }
+
       const [response] = await this.analyticsDataClient.runReport({
         property: `properties/${propertyId}`,
         dateRanges: [{ startDate, endDate }],
@@ -232,7 +388,13 @@ class GoogleAnalyticsService {
         return [];
       }
     } catch (error) {
-      logger.error('Failed to discover source/medium combinations:', error.message);
+      logger.error('Failed to discover source/medium combinations:', {
+        error: error.message,
+        stack: error.stack,
+        propertyId,
+        startDate,
+        endDate
+      });
       return [];
     }
   }

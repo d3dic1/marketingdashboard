@@ -1,29 +1,16 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import MetricCard from './MetricCard';
 import CombinedOverview from './CombinedOverview';
 import TopPerformers from './TopPerformers';
-import { BarChart2, Mail, MousePointerClick, Send, Users } from 'lucide-react';
+import { Mail, MousePointerClick, Send, Users } from 'lucide-react';
 
 const CampaignReports = ({ campaignIds = [] }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [campaignReports, setCampaignReports] = useState(null);
 
-  // Fetch data when campaignIds change
-  useEffect(() => {
-    console.log('CampaignReports: campaignIds changed:', campaignIds);
-    if (campaignIds.length > 0) {
-      console.log('CampaignReports: Fetching data for IDs:', campaignIds);
-      fetchCampaignReports();
-    } else {
-      console.log('CampaignReports: No campaign IDs available');
-      setCampaignReports(null);
-      setError(null);
-    }
-  }, [campaignIds]); // Use campaignIds array directly instead of join
-
-  const fetchCampaignReports = async () => {
+  const fetchCampaignReports = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
@@ -36,25 +23,91 @@ const CampaignReports = ({ campaignIds = [] }) => {
         return;
       }
 
+      // Check if we have too many campaigns to process efficiently
+      if (campaignIds.length > 20) {
+        setError(`Too many campaigns (${campaignIds.length}) to process efficiently. Please use the main dashboard for large datasets.`);
+        setLoading(false);
+        return;
+      }
+
       console.log('CampaignReports: Fetching reports for campaign IDs:', campaignIds);
 
-      // Fetch individual reports for all campaigns
-      const response = await api.get(`/campaigns/reports`, {
-        params: { campaignIds: campaignIds.join(',') },
-        headers: {
-          'Content-Type': 'application/json',
-        }
-      });
+      // Process campaigns in smaller batches to avoid timeouts and rate limiting
+      const BATCH_SIZE = 5; // Reduced from 20 to 5 to avoid conflicts with main dashboard processing
+      const batches = [];
+      for (let i = 0; i < campaignIds.length; i += BATCH_SIZE) {
+        batches.push(campaignIds.slice(i, i + BATCH_SIZE));
+      }
 
-      const data = response.data;
-      setCampaignReports(data);
+      const allReports = [];
+      
+      for (let i = 0; i < batches.length; i++) {
+        const batch = batches[i];
+        console.log(`CampaignReports: Processing batch ${i + 1}/${batches.length} with ${batch.length} campaigns`);
+        
+        try {
+          const response = await api.get(`/campaigns/reports`, {
+            params: { campaignIds: batch.join(',') },
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            timeout: 30000 // Reduced timeout to 30 seconds
+          });
+
+          if (response.data && response.data.campaigns) {
+            allReports.push(...response.data.campaigns);
+          }
+          
+          // Add a longer delay between batches to avoid overwhelming the server
+          if (i < batches.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 3000)); // Increased delay to 3 seconds
+          }
+        } catch (batchError) {
+          console.error(`CampaignReports: Error fetching batch ${i + 1}:`, batchError);
+          
+          // Handle specific error types
+          if (batchError.code === 'ECONNABORTED') {
+            console.warn(`CampaignReports: Batch ${i + 1} timed out, likely due to rate limiting. Continuing with remaining batches...`);
+          }
+          
+          // Continue with other batches even if one fails
+          // Add extra delay after error to allow rate limits to reset
+          if (i < batches.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+          }
+        }
+      }
+
+      if (allReports.length > 0) {
+        setCampaignReports({
+          campaigns: allReports,
+          total: allReports.length
+        });
+      } else {
+        setError('No campaign reports could be fetched. Please try again later.');
+      }
     } catch (err) {
       console.error('CampaignReports: Error fetching reports:', err);
-      setError(err.message);
+      setError(err.message || 'Failed to fetch campaign reports');
     } finally {
       setLoading(false);
     }
-  };
+  }, [campaignIds]);
+
+  // Fetch data when campaignIds change
+  const campaignIdsString = campaignIds.join(',');
+  
+  useEffect(() => {
+    console.log('CampaignReports: campaignIds changed:', campaignIds);
+    if (campaignIds.length > 0) {
+      console.log('CampaignReports: Fetching data for IDs:', campaignIds);
+      fetchCampaignReports();
+    } else {
+      console.log('CampaignReports: No campaign IDs available');
+      setCampaignReports(null);
+      setError(null);
+    }
+  }, [campaignIdsString, fetchCampaignReports]);
 
   const formatCampaignId = (id) => {
     return id.substring(0, 8) + '...';
@@ -242,7 +295,11 @@ const CampaignReports = ({ campaignIds = [] }) => {
             );
           })}
         </div>
-      ) : null}
+      ) : (
+        <div className="bg-card rounded-2xl shadow-lg border border-gray-100 p-8 text-center">
+          <p className="text-text-secondary font-medium">No campaign data available. Please add campaign IDs and refresh.</p>
+        </div>
+      )}
     </div>
   );
 };

@@ -237,158 +237,46 @@ Format the response as valid JSON with clear data structures.
 
   async createSheetsFromData(organizedData) {
     const results = [];
-    const columns = Object.keys(organizedData.rawData[0] || {});
+    // Only keep the specified columns (case-insensitive match)
+    const allowedColumns = [
+      'imps', 'clicks', 'installs', 'spend', 'customers', 'revenue', 'avg.position', 'visibility'
+    ];
+    // Map allowed columns to actual CSV columns (case-insensitive)
+    const rawColumns = Object.keys(organizedData.rawData[0] || {});
+    const columnMap = {};
+    allowedColumns.forEach(allowed => {
+      const found = rawColumns.find(col => col.toLowerCase() === allowed);
+      if (found) columnMap[allowed] = found;
+    });
+    const columns = Object.values(columnMap); // Actual CSV column names to use as headers
 
     try {
-      logger.info('Starting sheet creation process...');
-      
-      // Create daily sheets with rate limiting
-      const dailyEntries = Object.entries(organizedData.dailyData);
-      logger.info(`Creating ${dailyEntries.length} daily sheets...`);
-      
-      for (let i = 0; i < dailyEntries.length; i++) {
-        const [date, data] = dailyEntries[i];
-        const sheetName = `📅 ${date}`;
-        
-        try {
-          logger.info(`Processing daily sheet ${i + 1}/${dailyEntries.length}: ${sheetName}`);
-          const result = await this.sheetsService.createOrUpdateSheet(sheetName, data, columns);
-          
-          // Only format if sheet creation was successful
-          if (result.success) {
-            await this.sheetsService.formatSheet(sheetName);
-          }
-          
-          results.push(result);
-          
-          // Add a small delay between sheets to avoid overwhelming the API
-          if (i < dailyEntries.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-          }
-          
-        } catch (error) {
-          logger.error(`Error creating daily sheet ${sheetName}:`, error.message);
-          results.push({ success: false, sheetName, error: error.message });
-        }
+      // Only update the 'raw' sheet
+      const sheetName = 'raw';
+      logger.info('Updating only the raw sheet with allowed columns:', columns);
+      const filteredData = organizedData.rawData.map(row => {
+        const filteredRow = {};
+        columns.forEach(col => {
+          filteredRow[col] = row[col];
+        });
+        return filteredRow;
+      });
+      const rawResult = await this.sheetsService.createOrUpdateSheet(
+        sheetName,
+        filteredData,
+        columns
+      );
+      if (rawResult.success) {
+        await this.sheetsService.formatSheet(sheetName);
       }
-
-      // Create weekly summary sheet
-      try {
-        logger.info('Creating weekly summary sheet...');
-        const weeklySummary = this.createWeeklySummary(organizedData.weeklyData, columns);
-        const weeklyResult = await this.sheetsService.createOrUpdateSheet(
-          '📊 Weekly Summary', 
-          weeklySummary, 
-          ['Week', 'Record Count', 'Key Metrics', 'Notes']
-        );
-        if (weeklyResult.success) {
-          await this.sheetsService.formatSheet('📊 Weekly Summary');
-        }
-        results.push(weeklyResult);
-      } catch (error) {
-        logger.error('Error creating weekly summary sheet:', error.message);
-        results.push({ success: false, sheetName: '📊 Weekly Summary', error: error.message });
-      }
-
-      // Create monthly summary sheet
-      try {
-        logger.info('Creating monthly summary sheet...');
-        const monthlySummary = this.createMonthlySummary(organizedData.monthlyData, columns);
-        const monthlyResult = await this.sheetsService.createOrUpdateSheet(
-          '📈 Monthly Reports', 
-          monthlySummary, 
-          ['Month', 'Record Count', 'Key Metrics', 'Trends']
-        );
-        if (monthlyResult.success) {
-          await this.sheetsService.formatSheet('📈 Monthly Reports');
-        }
-        results.push(monthlyResult);
-      } catch (error) {
-        logger.error('Error creating monthly summary sheet:', error.message);
-        results.push({ success: false, sheetName: '📈 Monthly Reports', error: error.message });
-      }
-
-      // Create raw data sheet
-      try {
-        logger.info('Creating raw data sheet...');
-        const rawResult = await this.sheetsService.createOrUpdateSheet(
-          '📋 Raw Data', 
-          organizedData.rawData, 
-          columns
-        );
-        if (rawResult.success) {
-          await this.sheetsService.formatSheet('📋 Raw Data');
-        }
-        results.push(rawResult);
-      } catch (error) {
-        logger.error('Error creating raw data sheet:', error.message);
-        results.push({ success: false, sheetName: '📋 Raw Data', error: error.message });
-      }
-
-      const successCount = results.filter(r => r.success).length;
-      const totalCount = results.length;
-      logger.info(`Sheet creation completed: ${successCount}/${totalCount} sheets created successfully`);
-
+      results.push(rawResult);
+      logger.info(`Raw sheet updated: ${rawResult.rowsUpdated} rows`);
       return results;
-
     } catch (error) {
-      logger.error('Error creating sheets from data:', error);
+      logger.error('Error updating raw sheet:', error.message);
+      results.push({ success: false, sheetName: 'raw', error: error.message });
       throw error;
     }
-  }
-
-  createWeeklySummary(weeklyData, columns) {
-    return Object.entries(weeklyData).map(([week, data]) => {
-      const metrics = this.calculateMetrics(data, columns);
-      return [
-        week,
-        data.length,
-        JSON.stringify(metrics),
-        `Week of ${week} - ${data.length} records`
-      ];
-    });
-  }
-
-  createMonthlySummary(monthlyData, columns) {
-    return Object.entries(monthlyData).map(([month, data]) => {
-      const metrics = this.calculateMetrics(data, columns);
-      return [
-        month,
-        data.length,
-        JSON.stringify(metrics),
-        `Month ${month} - ${data.length} records`
-      ];
-    });
-  }
-
-  calculateMetrics(data, columns) {
-    const metrics = {};
-    
-    columns.forEach(column => {
-      const values = data.map(row => row[column]).filter(val => val !== undefined && val !== null);
-      
-      if (values.length > 0) {
-        // Try to parse as numbers
-        const numbers = values.map(val => parseFloat(val)).filter(num => !isNaN(num));
-        
-        if (numbers.length > 0) {
-          metrics[column] = {
-            sum: numbers.reduce((a, b) => a + b, 0),
-            average: numbers.reduce((a, b) => a + b, 0) / numbers.length,
-            min: Math.min(...numbers),
-            max: Math.max(...numbers),
-            count: numbers.length
-          };
-        } else {
-          metrics[column] = {
-            uniqueValues: [...new Set(values)].length,
-            totalCount: values.length
-          };
-        }
-      }
-    });
-
-    return metrics;
   }
 
   async generateInsights(data, analysis) {
@@ -460,55 +348,30 @@ Format as valid JSON with clear, actionable insights.
   // New method to process CSV content directly from memory
   async processCSVContentAndOrganizeSheets(csvContent, filename) {
     const startTime = Date.now();
-    
     try {
-      logger.info('Starting CSV content processing and sheet organization');
-
+      logger.info('Starting CSV content processing and raw sheet update');
       // Parse CSV data from content
       const csvData = await this.parseCSVContent(csvContent);
-      
       if (!csvData || csvData.length === 0) {
         throw new Error('No data found in CSV content');
       }
-
       logger.info('CSV parsed successfully:', { recordCount: csvData.length });
-
-      // Analyze data structure with AI
+      // Analyze data structure with AI (optional, but keep for future use)
       const analysis = await this.analyzeDataStructure(csvData);
-      
-      // Organize data by AI recommendations
-      const organizedData = await this.organizeDataByAI(csvData, analysis);
-      
-      // Create sheets based on organization
+      // Organize data (just wrap as rawData)
+      const organizedData = { rawData: csvData };
+      // Only update the raw sheet
       const sheetResults = await this.createSheetsFromData(organizedData);
-      
-      // Generate AI insights
-      const insights = await this.generateInsights(csvData, analysis);
-      
-      // Create summary sheet
       const processingTime = ((Date.now() - startTime) / 1000).toFixed(2);
-      const summaryData = {
-        totalRecords: csvData.length,
-        dateRange: this.getDateRange(csvData),
-        sheetsCreated: sheetResults.length,
-        processingTime: `${processingTime}s`,
-        aiInsights: insights.summary,
-        filename: filename
-      };
-
-      await this.sheetsService.createSummarySheet(summaryData);
-
       return {
         success: true,
         totalRecords: csvData.length,
-        sheetsCreated: sheetResults.length,
+        sheetsCreated: 1,
         processingTime: `${processingTime}s`,
-        insights: insights,
         spreadsheetUrl: await this.sheetsService.getSpreadsheetUrl()
       };
-
     } catch (error) {
-      logger.error('Error processing CSV content and organizing sheets:', error);
+      logger.error('Error processing CSV content and updating raw sheet:', error);
       throw error;
     }
   }

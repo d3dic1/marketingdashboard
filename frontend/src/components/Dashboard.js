@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { UsersIcon, EyeIcon, CursorArrowRaysIcon, EnvelopeOpenIcon } from '@heroicons/react/24/outline';
 import { setAuthToken, authorizedRequest } from '../services/api';
 import IdManager from './IdManager';
@@ -15,10 +15,11 @@ const TIMEFRAMES = [
   { label: 'All Time', value: 'all-time' },
 ];
 
-const BATCH_SIZE = 10;
+const BATCH_SIZE = 50;
 
 const Dashboard = () => {
   const [loading, setLoading] = useState(false);
+  const [backgroundLoading, setBackgroundLoading] = useState(false);
   const [error, setError] = useState(null);
   const [reportData, setReportData] = useState({});
   const [isCampaignManagerOpen, setIsCampaignManagerOpen] = useState(false);
@@ -32,7 +33,143 @@ const Dashboard = () => {
   const [isPartial, setIsPartial] = useState(false);
   const [partialMessage, setPartialMessage] = useState('');
   const [summary, setSummary] = useState(null);
+  const [hasInitialData, setHasInitialData] = useState(false);
   const { user } = useAuth();
+
+  // Use ref to store loadNextBatch function to avoid circular dependency
+  const loadNextBatchRef = useRef();
+
+  // Helper to merge reports by ID
+  function mergeReportsById(existing, incoming) {
+    const map = new Map();
+    existing.forEach(r => map.set(r.id, r));
+    incoming.forEach(r => map.set(r.id, { ...map.get(r.id), ...r }));
+    return Array.from(map.values());
+  }
+
+  // Batch loading function - define this before useEffect to avoid circular dependency
+  const loadNextBatch = useCallback(async (pending, loaded, tf, forceRefresh) => {
+    if (forceRefresh) {
+      setLoading(true);
+    } else {
+      setBackgroundLoading(true);
+    }
+    setError(null);
+    setIsPartial(false);
+    setPartialMessage('');
+    setSummary(null);
+    
+    try {
+      const response = await authorizedRequest({ 
+        method: 'post', 
+        url: '/reports/dashboard-reports', 
+        data: { items: pending, timeframe: tf, forceRefresh: !!forceRefresh } 
+      });
+      
+      console.log('API response:', response.data); // Debug log
+      
+      if (!response.data || response.data.error) {
+        setError(response.data?.error || 'No data returned from backend');
+        setBackgroundLoading(false);
+        setLoading(false);
+        return;
+      }
+      
+      let newReports = response.data.reports || response.data || [];
+      if (!Array.isArray(newReports)) newReports = [newReports];
+
+      // Merge new reports with existing loaded data, updating by ID
+      const updatedLoaded = mergeReportsById(loaded, newReports);
+      setReportData(prev => ({ ...prev, [tf]: updatedLoaded }));
+      
+      // Update pending items based on response
+      if (response.data.pending && Array.isArray(response.data.pending)) {
+        setPendingItems(response.data.pending);
+      } else {
+        setPendingItems([]);
+      }
+
+      // Handle rate limited items
+      if (response.data.rateLimited && response.data.rateLimited.length > 0) {
+        setRateLimitedItems(prev => mergeReportsById(prev, response.data.rateLimited));
+      }
+
+      // Handle partial/rate-limited
+      if (response.data.partial) {
+        setIsPartial(true);
+        setPartialMessage(response.data.message || 'Some data is still loading...');
+        setSummary(response.data.summary || null);
+        
+        // Start polling for updates if background processing is happening
+        if (response.data.summary?.source === 'background_processing' || response.data.summary?.source === 'partial_cache') {
+          startPollingForUpdates(tf, updatedLoaded.length);
+        }
+      } else {
+        setIsPartial(false);
+        setPartialMessage('');
+        setSummary(response.data.summary || null);
+      }
+
+      // Show background refresh notification
+      if (response.data.summary?.source === 'cache_refreshing') {
+        setPartialMessage('Data loaded from cache. Fresh data is being fetched in the background...');
+        setIsPartial(true);
+      }
+      
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
+    } finally {
+      if (forceRefresh) {
+        setLoading(false);
+      } else {
+        setBackgroundLoading(false);
+      }
+    }
+  }, [timeframe]);
+
+  // Polling function for background updates
+  const startPollingForUpdates = useCallback(async (tf, lastCount) => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const response = await authorizedRequest({ 
+          method: 'get', 
+          url: `/reports/poll-cached-reports?timeframe=${tf}&lastCount=${lastCount}` 
+        });
+        
+        if (response.data.hasUpdates) {
+          console.log('Polling found updates:', response.data.message);
+          const newReports = response.data.reports || [];
+          setReportData(prev => ({ ...prev, [tf]: newReports }));
+          setPartialMessage(response.data.message);
+          
+          // Update last count for next poll
+          lastCount = response.data.count;
+          
+          // If we have all the data, stop polling
+          if (response.data.count >= pendingItems.length) {
+            clearInterval(pollInterval);
+            setIsPartial(false);
+            setPartialMessage('All data loaded successfully');
+            setBackgroundLoading(false);
+          }
+        }
+      } catch (error) {
+        console.error('Polling error:', error);
+        clearInterval(pollInterval);
+      }
+    }, 5000); // Poll every 5 seconds
+    
+    // Stop polling after 5 minutes
+    setTimeout(() => {
+      clearInterval(pollInterval);
+      setBackgroundLoading(false);
+    }, 300000);
+  }, [pendingItems.length]);
+
+  // Store the function in ref to avoid circular dependency
+  useEffect(() => {
+    loadNextBatchRef.current = loadNextBatch;
+  }, [loadNextBatch]);
 
   // Load cached data on mount
   const loadCachedData = useCallback(async () => {
@@ -47,122 +184,113 @@ const Dashboard = () => {
         setReportData(prev => ({ ...prev, [timeframe]: response.data.reports }));
         setPartialMessage(`Loaded ${response.data.count} cached reports (${response.data.cacheAge} minutes old)`);
         setIsPartial(true);
+        setHasInitialData(true);
         console.log('Loaded cached data:', response.data.message);
+        return true; // Indicate that we have cached data
       }
     } catch (error) {
       console.log('No cached data available or error loading cache:', error.message);
     }
+    return false; // No cached data available
   }, [user, timeframe]);
 
   // Load IDs from backend or localStorage on mount
   useEffect(() => {
     const fetchIds = async () => {
+      console.log('Dashboard: Fetching IDs, user:', !!user);
       if (user) {
         const token = await user.getIdToken();
         setAuthToken(token);
         try {
           const res = await authorizedRequest({ method: 'get', url: '/auth/ids' });
+          console.log('Dashboard: Loaded IDs from backend:', {
+            campaigns: res.data.campaignIds?.length || 0,
+            journeys: res.data.journeyIds?.length || 0
+          });
           setCampaignIds(res.data.campaignIds || []);
           setJourneyIds(res.data.journeyIds || []);
           
           // Load cached data after IDs are loaded
-          await loadCachedData();
+          const hasCachedData = await loadCachedData();
+          
+          // Only start background loading if we have IDs and no cached data
+          if ((res.data.campaignIds?.length > 0 || res.data.journeyIds?.length > 0) && !hasCachedData) {
+            // Start background loading for fresh data
+            setBackgroundLoading(true);
+            const allItems = [
+              ...(res.data.campaignIds || []).map(id => ({ id, type: 'campaign' })),
+              ...(res.data.journeyIds || []).map(id => ({ id, type: 'journey' })),
+            ];
+            setPendingItems(allItems);
+            if (loadNextBatchRef.current) {
+              loadNextBatchRef.current(allItems, [], timeframe, false);
+            }
+          }
         } catch (err) {
+          console.error('Dashboard: Error loading IDs from backend:', err);
           setCampaignIds([]);
           setJourneyIds([]);
         }
       } else {
         const savedCampaignIds = localStorage.getItem('campaignIds');
         const savedJourneyIds = localStorage.getItem('journeyIds');
+        console.log('Dashboard: Loaded IDs from localStorage:', {
+          campaigns: savedCampaignIds?.split(',').filter(Boolean).length || 0,
+          journeys: savedJourneyIds?.split(',').filter(Boolean).length || 0
+        });
         if (savedCampaignIds) setCampaignIds(savedCampaignIds.split(',').filter(Boolean));
         if (savedJourneyIds) setJourneyIds(savedJourneyIds.split(',').filter(Boolean));
       }
     };
     fetchIds();
-    // eslint-disable-next-line
-  }, [user, loadCachedData]);
+  }, [user]);
 
   // Reset and start batch loading when IDs or timeframe change
   useEffect(() => {
-    const allItems = [
-      ...campaignIds.map(id => ({ id, type: 'campaign' })),
-      ...journeyIds.map(id => ({ id, type: 'journey' })),
-    ];
+    console.log('Dashboard: IDs or timeframe changed:', {
+      campaigns: campaignIds.length,
+      journeys: journeyIds.length,
+      timeframe,
+      hasData: Array.isArray(reportData[timeframe]) && reportData[timeframe].length > 0
+    });
     
-    // Don't reset reportData immediately - let the API call determine what's cached
-    setPendingItems(allItems);
-    setRateLimitedItems([]); // Clear rate limited items when IDs change
-    setIsPartial(false);
-    setPartialMessage('');
-    setSummary(null);
-    setError(null);
-    
-    if (allItems.length > 0) {
-      loadNextBatch(allItems, reportData[timeframe] || [], timeframe, false);
+    // Skip this effect on initial load if we don't have IDs yet
+    if (campaignIds.length === 0 && journeyIds.length === 0) {
+      console.log('Dashboard: No IDs available, skipping data loading');
+      return;
     }
-    // eslint-disable-next-line
+
+    // Only trigger batch loading if we do NOT already have data for this timeframe
+    if (Array.isArray(reportData[timeframe]) && reportData[timeframe].length > 0) {
+      console.log('Dashboard: Data already loaded for timeframe, skipping batch loading');
+      return;
+    }
+    
+    // Add debounce to prevent rapid successive calls
+    const timeoutId = setTimeout(() => {
+      const allItems = [
+        ...campaignIds.map(id => ({ id, type: 'campaign' })),
+        ...journeyIds.map(id => ({ id, type: 'journey' })),
+      ];
+      
+      console.log('Dashboard: Starting batch loading for', allItems.length, 'items');
+      
+      // Don't reset reportData immediately - let the API call determine what's cached
+      setPendingItems(allItems);
+      setRateLimitedItems([]); // Clear rate limited items when IDs change
+      setIsPartial(false);
+      setPartialMessage('');
+      setSummary(null);
+      setError(null);
+      
+      if (allItems.length > 0 && loadNextBatchRef.current) {
+        setBackgroundLoading(true);
+        loadNextBatchRef.current(allItems, reportData[timeframe] || [], timeframe, false);
+      }
+    }, 500); // 500ms debounce
+    
+    return () => clearTimeout(timeoutId);
   }, [campaignIds.join(','), journeyIds.join(','), timeframe]);
-
-  // Helper to merge reports by ID
-  function mergeReportsById(existing, incoming) {
-    const map = new Map();
-    existing.forEach(r => map.set(r.id, r));
-    incoming.forEach(r => map.set(r.id, { ...map.get(r.id), ...r }));
-    return Array.from(map.values());
-  }
-
-  // Batch loading function
-  const loadNextBatch = useCallback(async (pending, loaded, tf, forceRefresh) => {
-    setLoading(true);
-    setError(null);
-    setIsPartial(false);
-    setPartialMessage('');
-    setSummary(null);
-    const batch = pending.slice(0, BATCH_SIZE);
-    const remaining = pending.slice(BATCH_SIZE);
-    try {
-      const response = await authorizedRequest({ method: 'post', url: '/reports/dashboard-reports', data: { items: batch, timeframe: tf, forceRefresh: !!forceRefresh } });
-      let newReports = response.data.reports || response.data || [];
-      // If backend returns a single object, wrap in array
-      if (!Array.isArray(newReports)) newReports = [newReports];
-
-      // Merge new reports with existing loaded data, updating by ID
-      const updatedLoaded = mergeReportsById(loaded, newReports);
-      setReportData(prev => ({ ...prev, [tf]: updatedLoaded }));
-      setPendingItems(remaining);
-
-      // Handle rate limited items
-      if (response.data.rateLimited && response.data.rateLimited.length > 0) {
-        setRateLimitedItems(prev => mergeReportsById(prev, response.data.rateLimited));
-      }
-
-      // Handle partial/rate-limited
-      if (response.data.partial) {
-        setIsPartial(true);
-        setPartialMessage(response.data.message || 'Some data is still loading...');
-        setSummary(response.data.summary || null);
-      } else {
-        setIsPartial(false);
-        setPartialMessage('');
-        setSummary(response.data.summary || null);
-      }
-
-      // Show background refresh notification
-      if (response.data.summary?.source === 'cache_refreshing') {
-        setPartialMessage('Data loaded from cache. Fresh data is being fetched in the background...');
-        setIsPartial(true);
-      }
-
-      // Only schedule next batch if there are more to load AND we're not rate limited
-      if (remaining.length > 0 && (!response.data.rateLimited || response.data.rateLimited.length === 0)) {
-        setTimeout(() => loadNextBatch(remaining, updatedLoaded, tf, false), 2000); // Increased delay to 2 seconds
-      }
-    } catch (err) {
-      setError(err.response?.data?.error || err.message);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
 
   // Manual refresh function
   const handleRefresh = useCallback(async () => {
@@ -181,9 +309,12 @@ const Dashboard = () => {
     setError(null);
     
     if (allItems.length > 0) {
-      loadNextBatch(allItems, reportData[timeframe] || [], timeframe, false);
+      setBackgroundLoading(true);
+      if (loadNextBatchRef.current) {
+        loadNextBatchRef.current(allItems, reportData[timeframe] || [], timeframe, false);
+      }
     }
-  }, [campaignIds, journeyIds, timeframe, loadNextBatch, reportData]);
+  }, [campaignIds, journeyIds, timeframe, reportData]);
 
   // Force refresh function (bypasses cache)
   const handleForceRefresh = useCallback(async () => {
@@ -199,9 +330,11 @@ const Dashboard = () => {
     setSummary(null);
     setError(null);
     if (allItems.length > 0) {
-      loadNextBatch(allItems, [], timeframe, true);
+      if (loadNextBatchRef.current) {
+        loadNextBatchRef.current(allItems, [], timeframe, true);
+      }
     }
-  }, [campaignIds, journeyIds, timeframe, loadNextBatch]);
+  }, [campaignIds, journeyIds, timeframe, reportData]);
 
   // Clear cache function
   const handleClearCache = useCallback(async () => {
@@ -260,6 +393,52 @@ const Dashboard = () => {
       .slice(0, 5);
   }, [reportData, timeframe]);
 
+  // Save campaign IDs to backend or localStorage
+  const handleSaveCampaigns = async (newCampaignIds) => {
+    console.log('Dashboard: Saving campaign IDs:', newCampaignIds);
+    setCampaignIds(newCampaignIds);
+    setIsCampaignManagerOpen(false);
+    if (user) {
+      const token = await user.getIdToken();
+      setAuthToken(token);
+      try {
+        await authorizedRequest({ method: 'post', url: '/auth/ids', data: { campaignIds: newCampaignIds } });
+        console.log('Dashboard: Campaign IDs saved to backend successfully');
+      } catch (err) {
+        console.error('Error saving campaign IDs:', err);
+        // Fallback to localStorage if backend save fails
+        localStorage.setItem('campaignIds', newCampaignIds.join(','));
+        console.log('Dashboard: Campaign IDs saved to localStorage as fallback');
+      }
+    } else {
+      localStorage.setItem('campaignIds', newCampaignIds.join(','));
+      console.log('Dashboard: Campaign IDs saved to localStorage');
+    }
+  };
+
+  // Save journey IDs to backend or localStorage
+  const handleSaveJourneys = async (newJourneyIds) => {
+    console.log('Dashboard: Saving journey IDs:', newJourneyIds);
+    setJourneyIds(newJourneyIds);
+    setIsJourneyManagerOpen(false);
+    if (user) {
+      const token = await user.getIdToken();
+      setAuthToken(token);
+      try {
+        await authorizedRequest({ method: 'post', url: '/auth/ids', data: { journeyIds: newJourneyIds } });
+        console.log('Dashboard: Journey IDs saved to backend successfully');
+      } catch (err) {
+        console.error('Error saving journey IDs:', err);
+        // Fallback to localStorage if backend save fails
+        localStorage.setItem('journeyIds', newJourneyIds.join(','));
+        console.log('Dashboard: Journey IDs saved to localStorage as fallback');
+      }
+    } else {
+      localStorage.setItem('journeyIds', newJourneyIds.join(','));
+      console.log('Dashboard: Journey IDs saved to localStorage');
+    }
+  };
+
   // Handle auto-discovery completion
   const handleAutoDiscoveryComplete = async (discoveredData) => {
     // Update the local state with discovered IDs
@@ -273,45 +452,56 @@ const Dashboard = () => {
 
   // Auto-refresh for pending data
   useEffect(() => {
-    if (isPartial && (pendingItems.length > 0 || rateLimitedItems.length > 0)) {
-      // Don't auto-refresh if we have rate limited items - wait longer
-      if (rateLimitedItems.length > 0) {
-        console.log('Rate limited items detected, waiting 5 minutes before retry');
-        const timer = setTimeout(() => {
-          console.log('Retrying after rate limit cooldown...');
-          // Retry with existing data maintained, but only for non-rate-limited items
-          const allItems = [
-            ...campaignIds.map(id => ({ id, type: 'campaign' })),
-            ...journeyIds.map(id => ({ id, type: 'journey' })),
-          ];
-          
-          // Filter out items that are currently rate limited
-          const rateLimitedIds = new Set(rateLimitedItems.map(item => item.id));
-          const availableItems = allItems.filter(item => !rateLimitedIds.has(item.id));
-          
-          setPendingItems(availableItems);
-          setRateLimitedItems([]); // Clear rate limited items for retry
-          loadNextBatch(availableItems, reportData[timeframe] || [], timeframe, false);
-        }, 300000); // 5 minutes for rate limited items
-
-        return () => clearTimeout(timer);
-      }
-      
-      // For pending items only, wait 2 minutes
+    // Only auto-refresh for pending items, not for rate-limited items
+    if (isPartial && pendingItems.length > 0 && rateLimitedItems.length === 0) {
+      // Retry with existing data maintained
       const timer = setTimeout(() => {
         console.log('Auto-refreshing dashboard data for pending items...');
-        // Retry with existing data maintained
+        // Only retry up to 3 times to avoid infinite loop
+        if (!window.__dashboardPendingRetries) window.__dashboardPendingRetries = 0;
+        window.__dashboardPendingRetries++;
+        if (window.__dashboardPendingRetries > 3) {
+          setPartialMessage('Some data could not be loaded after several attempts. Please try again later or click Refresh.');
+          return;
+        }
         const allItems = [
           ...campaignIds.map(id => ({ id, type: 'campaign' })),
           ...journeyIds.map(id => ({ id, type: 'journey' })),
         ];
         setPendingItems(allItems);
-        loadNextBatch(allItems, reportData[timeframe] || [], timeframe, false);
+        if (loadNextBatchRef.current) {
+          loadNextBatchRef.current(allItems, reportData[timeframe] || [], timeframe, false);
+        }
       }, 120000); // 2 minutes for pending items
-
       return () => clearTimeout(timer);
     }
-  }, [isPartial, pendingItems.length, rateLimitedItems, campaignIds, journeyIds, loadNextBatch, reportData, timeframe]);
+    // If rate-limited, show warning and do not auto-retry
+    if (isPartial && rateLimitedItems.length > 0) {
+      setPartialMessage('Rate limited by Ortto API. Please wait a few minutes and click Refresh.');
+      // Do not auto-retry while rate-limited
+      window.__dashboardPendingRetries = 0;
+    }
+    // Reset retry counter if not partial
+    if (!isPartial) {
+      window.__dashboardPendingRetries = 0;
+    }
+  }, [isPartial, pendingItems.length, rateLimitedItems, campaignIds, journeyIds, reportData, timeframe]);
+
+  // Auto-refresh for partial cache
+  useEffect(() => {
+    if (isPartial || (Array.isArray(pendingItems) && pendingItems.length > 0)) {
+      const interval = setInterval(() => {
+        // Re-fetch cached data
+        loadCachedData();
+      }, 10000); // 10 seconds
+      return () => clearInterval(interval);
+    }
+    // No auto-refresh needed if all data is loaded
+    return undefined;
+  }, [isPartial, pendingItems, loadCachedData]);
+
+  // Error display logic
+  const showNoReportsError = error && (!reportData[timeframe] || reportData[timeframe].length === 0);
 
   return (
     <div className="space-y-8 px-2 sm:px-4 md:px-8 max-w-full w-full">
@@ -319,6 +509,12 @@ const Dashboard = () => {
         <div>
           <h1 className="text-3xl font-bold text-text">Dashboard</h1>
           <p className="text-text-secondary">Welcome back, here's a look at your performance.</p>
+          {backgroundLoading && !loading && (
+            <div className="text-blue-600 text-sm mt-1 flex items-center gap-1">
+              <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-blue-600"></div>
+              <span>Updating data in background...</span>
+            </div>
+          )}
         </div>
         <div className="flex flex-wrap gap-3 w-full md:w-auto">
           <button 
@@ -378,7 +574,11 @@ const Dashboard = () => {
         </div>
       </div>
 
-      {error && <div className="bg-danger/10 border border-danger text-danger px-6 py-4 rounded-xl font-medium">{error}</div>}
+      {showNoReportsError && (
+        <div className="bg-danger/10 border border-danger text-danger px-6 py-4 rounded-xl font-medium">
+          {error}
+        </div>
+      )}
 
       {/* Warning for too many campaigns */}
       {campaignIds.length > 50 && (
@@ -388,6 +588,16 @@ const Dashboard = () => {
             <span>
               You are loading {campaignIds.length} campaigns/journeys. This may cause rate limiting and slow loading. Consider reducing the number of items or use the auto-discovery feature to get the most recent data.
             </span>
+          </div>
+        </div>
+      )}
+
+      {/* Background loading indicator */}
+      {backgroundLoading && !loading && (
+        <div className="bg-blue-50 border border-blue-200 text-blue-800 px-4 py-2 rounded-lg text-sm font-medium">
+          <div className="flex items-center gap-2">
+            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+            <span>Fetching fresh data in the background...</span>
           </div>
         </div>
       )}
@@ -409,7 +619,7 @@ const Dashboard = () => {
              summary.source === 'partial_cache' ? '⚠️' : '🔄'}
             <span>
               {summary.source === 'firebase_cache' 
-                ? 'Using cached data from Firebase (5-minute cache)' 
+                ? 'Using cached data from Firebase (24-hour cache)' 
                 : summary.source === 'cache_refreshing'
                 ? 'Using cached data (refreshing in background)'
                 : summary.source === 'partial_cache'
@@ -473,6 +683,16 @@ const Dashboard = () => {
         </div>
       )}
 
+      {/* Show a loading/progress indicator if partial */}
+      {isPartial && (
+        <div className="bg-blue-50 border border-blue-200 text-blue-800 px-4 py-2 rounded-lg text-sm font-medium">
+          <div className="flex items-center gap-2">
+            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+            <span>Loading missing data in the background...</span>
+          </div>
+        </div>
+      )}
+
       {loading ? (
         <div className="text-center py-8">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-accent mx-auto mb-4"></div>
@@ -500,8 +720,8 @@ const Dashboard = () => {
         </div>
       )}
 
-      <IdManager isOpen={isCampaignManagerOpen} onClose={() => setIsCampaignManagerOpen(false)} onSave={setCampaignIds} initialIds={campaignIds} entityType="campaign" />
-      <IdManager isOpen={isJourneyManagerOpen} onClose={() => setIsJourneyManagerOpen(false)} onSave={setJourneyIds} initialIds={journeyIds} entityType="journey" />
+      <IdManager isOpen={isCampaignManagerOpen} onClose={() => setIsCampaignManagerOpen(false)} onSave={handleSaveCampaigns} initialIds={campaignIds} entityType="campaign" />
+      <IdManager isOpen={isJourneyManagerOpen} onClose={() => setIsJourneyManagerOpen(false)} onSave={handleSaveJourneys} initialIds={journeyIds} entityType="journey" />
       
       {/* Auto-Discovery Modal */}
       {isAutoDiscoveryOpen && (

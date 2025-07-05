@@ -14,7 +14,7 @@ import {
   FileText,
   GitBranch,
   Target,
-  Brain,
+
   Sparkles,
   Image,
   Menu
@@ -26,7 +26,7 @@ const navItems = [
   { to: '/journey-reports', icon: GitBranch, label: 'Journey Reports' },
   { to: '/ai-email-optimizer', icon: Bot, label: 'AI Email Optimizer', group: 'AI Tools' },
   { to: '/ai-pacing-editor', icon: Zap, label: 'AI Pacing Editor', group: 'AI Tools' },
-  { to: '/audience-intelligence', icon: Brain, label: 'Audience Intelligence', group: 'AI Tools' },
+
   { to: '/ai-studio', icon: Sparkles, label: 'AI Studio', group: 'AI Studio' },
   { to: '/smart-recommendations', icon: Wand2, label: 'Smart Recommendations', group: 'AI Studio' },
   { to: '/visual-content', icon: Image, label: 'Visual Content', group: 'AI Studio' },

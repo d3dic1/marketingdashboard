@@ -1,21 +1,21 @@
 import React from 'react';
 import { Mail, TrendingUp, TrendingDown } from 'lucide-react';
 
-const TopPerformers = ({ data = [] }) => {
+const TopPerformers = ({ data = [], title = "Top Performing Emails" }) => {
   // Use passed data, or an empty array as a fallback
   const topEmails = data.length > 0 ? data : [];
 
   return (
     <div className="bg-background-secondary p-4 sm:p-6 rounded-xl border border-border min-w-0">
-      <h2 className="text-lg sm:text-xl font-bold text-text mb-4">Top Performing Emails</h2>
+      <h2 className="text-lg sm:text-xl font-bold text-text mb-4">{title}</h2>
       <div className="overflow-x-auto">
         <table className="w-full text-left min-w-[500px]">
           <thead>
             <tr className="border-b border-border">
-              <th className="p-2 sm:p-4 text-xs sm:text-sm font-semibold text-text-secondary">Email Name</th>
+              <th className="p-2 sm:p-4 text-xs sm:text-sm font-semibold text-text-secondary">Name</th>
               <th className="p-2 sm:p-4 text-xs sm:text-sm font-semibold text-text-secondary">Type</th>
-              <th className="p-2 sm:p-4 text-xs sm:text-sm font-semibold text-text-secondary text-right">Open Rate</th>
-              <th className="p-2 sm:p-4 text-xs sm:text-sm font-semibold text-text-secondary text-right">Click Rate</th>
+              <th className="p-2 sm:p-4 text-xs sm:text-sm font-semibold text-text-secondary text-right">Open/Entry Rate</th>
+              <th className="p-2 sm:p-4 text-xs sm:text-sm font-semibold text-text-secondary text-right">Click/Retention Rate</th>
             </tr>
           </thead>
           <tbody>

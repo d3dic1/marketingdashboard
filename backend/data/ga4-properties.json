@@ -41,6 +41,13 @@
       "label": "Order Printer Pro",
       "addedAt": "2025-06-26T15:33:42.848Z",
       "isActive": true
+    },
+    {
+      "id": "1751272293095",
+      "propertyId": "390201417",
+      "label": "Accentuate",
+      "addedAt": "2025-06-30T08:31:33.095Z",
+      "isActive": true
     }
   ],
   "defaultPropertyId": "389865217"

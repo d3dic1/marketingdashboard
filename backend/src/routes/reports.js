@@ -293,15 +293,15 @@ const filterRateLimitedItems = async (userId, items, timeframe = 'all-time') => 
 router.post('/dashboard-reports', verifyToken, async (req, res) => {
   try {
     const { items, timeframe, forceRefresh = false } = req.body;
-    const BATCH_LIMIT = 10; // Reduced from 20 to 10 to avoid rate limiting
+    const BATCH_LIMIT = 50;
     const userId = req.user.uid;
     
     // If no items provided, try to get all cached reports
     if (!items || !Array.isArray(items) || items.length === 0) {
       logger.info('No items provided, attempting to get all cached reports');
       const cachedReports = await getCachedReportsFromFirebase(userId, timeframe, []);
-      
       if (cachedReports && cachedReports.reports.length > 0) {
+        logger.info('Returning cached reports:', cachedReports.reports);
         return res.json({
           reports: cachedReports.reports,
           pending: [],
@@ -317,118 +317,148 @@ router.post('/dashboard-reports', verifyToken, async (req, res) => {
           }
         });
       } else {
-        return res.status(400).json({ error: 'No items provided and no cached data available' });
+        return res.json({
+          reports: [],
+          pending: [],
+          partial: false,
+          rateLimited: [],
+          message: 'No cached data available',
+          summary: {
+            total: 0,
+            fetched: 0,
+            pending: 0,
+            rateLimited: 0,
+            source: 'firebase_cache'
+          }
+        });
       }
     }
 
     // Validate items structure
     const validItems = items.filter(item => {
-      if (!item || typeof item !== 'object') {
-        logger.warn(`Invalid item: not an object - ${JSON.stringify(item)}`);
-        return false;
-      }
-      if (!item.id) {
-        logger.warn(`Invalid item: missing id - ${JSON.stringify(item)}`);
-        return false;
-      }
-      if (!item.type || (item.type !== 'campaign' && item.type !== 'journey')) {
-        logger.warn(`Invalid item: missing or invalid type - ${JSON.stringify(item)}`);
-        return false;
-      }
+      if (!item || typeof item !== 'object') return false;
+      if (!item.id) return false;
+      if (!item.type || (item.type !== 'campaign' && item.type !== 'journey')) return false;
       return true;
     });
-
-    if (validItems.length !== items.length) {
-      logger.warn(`Filtered out ${items.length - validItems.length} invalid items out of ${items.length} total items`);
-    }
 
     if (validItems.length === 0) {
       return res.status(400).json({ 
         error: 'No valid items provided. Each item must have an id and type (campaign or journey)',
-        invalidItems: items.length - validItems.length
+        invalidItems: items.length
       });
     }
 
     logger.info('Fetching dashboard reports for items:', validItems);
 
-    // Filter out rate limited items before processing
-    const { availableItems, stillRateLimited } = await filterRateLimitedItems(userId, validItems, timeframe);
-    
-    if (availableItems.length === 0 && stillRateLimited.length > 0) {
-      logger.info(`All requested items are currently rate limited for user ${userId}`);
-      return res.json({
-        reports: [],
-        pending: [],
-        partial: false,
-        rateLimited: stillRateLimited,
-        message: `All ${stillRateLimited.length} items are currently rate limited. Please wait 5 minutes before retrying.`,
-        summary: {
-          total: validItems.length,
-          fetched: 0,
-          pending: 0,
-          rateLimited: stillRateLimited.length,
-          source: 'rate_limited'
+    // Always try to get cached reports first
+    const cachedReports = await getCachedReportsFromFirebase(userId, timeframe, validItems);
+    if (!forceRefresh) {
+      // Only return cached data, do not fetch from Ortto
+      if (cachedReports && cachedReports.reports.length > 0) {
+        logger.info(`Returning ${cachedReports.reports.length} cached reports (no force refresh)`);
+        const filteredReports = cachedReports.reports.filter(r => r !== null);
+        const missingIds = (cachedReports.missingItems || []).map(item => item.id);
+        
+        // If we have all the requested items cached, return them
+        if (missingIds.length === 0) {
+          return res.json({
+            reports: filteredReports,
+            pending: [],
+            partial: false,
+            rateLimited: [],
+            message: `Using cached data from ${new Date(filteredReports[0]?.fetchedAt || Date.now()).toLocaleString()}`,
+            summary: {
+              total: validItems.length,
+              fetched: filteredReports.length,
+              pending: 0,
+              rateLimited: 0,
+              source: 'firebase_cache'
+            }
+          });
         }
-      });
+        
+        // If we have some cached data but missing some, start background fetching
+        logger.info(`Background fetching ${missingIds.length} missing items in batches`);
+        const itemsToFetch = validItems.filter(item => missingIds.includes(item.id));
+        processItemsInBackground(userId, itemsToFetch, timeframe, BATCH_LIMIT)
+          .catch(err => logger.error('Background fetch failed:', err));
+        
+        return res.json({
+          reports: filteredReports,
+          pending: missingIds,
+          partial: true,
+          rateLimited: [],
+          message: `Partial cache: ${filteredReports.length} reports loaded, ${missingIds.length} missing. Loading missing data in background...`,
+          summary: {
+            total: validItems.length,
+            fetched: filteredReports.length,
+            pending: missingIds.length,
+            rateLimited: 0,
+            source: 'partial_cache'
+          }
+        });
+      } else {
+        // No cache, start background processing for all items
+        logger.info(`No cached data available, starting background processing for ${validItems.length} items`);
+        processItemsInBackground(userId, validItems, timeframe, BATCH_LIMIT)
+          .catch(err => logger.error('Background fetch failed:', err));
+        
+        return res.json({
+          reports: [],
+          pending: validItems.map(item => item.id),
+          partial: true,
+          rateLimited: [],
+          message: 'No cached data available. Loading data in background...',
+          summary: {
+            total: validItems.length,
+            fetched: 0,
+            pending: validItems.length,
+            rateLimited: 0,
+            source: 'background_processing'
+          }
+        });
+      }
     }
 
-    // Always try to get cached reports first (unless force refresh is requested)
-    const cachedReports = await getCachedReportsFromFirebase(userId, timeframe, availableItems);
-    let responseData = {
-      reports: [],
+    // If forceRefresh is true, fetch from Ortto and update cache
+    logger.info('Force refresh requested, fetching all items from Ortto');
+    const reports = [];
+    for (let i = 0; i < validItems.length; i += BATCH_LIMIT) {
+      const batch = validItems.slice(i, i + BATCH_LIMIT);
+      const batchReports = await Promise.all(batch.map(async (item) => {
+        try {
+          if (item.type === 'campaign') {
+            const report = await orttoService.fetchReport(item.id, timeframe);
+            return { id: item.id, type: 'campaign', ...report };
+          } else if (item.type === 'journey') {
+            const report = await orttoService.fetchJourneyReport(item.id, timeframe);
+            return { id: item.id, type: 'journey', ...report };
+          }
+        } catch (error) {
+          logger.error(`Error fetching report for ${item.type} ${item.id}:`, error);
+          return null;
+        }
+      }));
+      reports.push(...batchReports.filter(r => r !== null));
+    }
+    logger.info('Returning reports (force refresh):', reports);
+    // Save to cache in background
+    saveReportsToFirebase(userId, reports, timeframe);
+    return res.json({
+      reports,
       pending: [],
       partial: false,
-      rateLimited: stillRateLimited,
-      message: '',
+      rateLimited: [],
+      message: 'Fetched fresh data from Ortto',
       summary: {
         total: validItems.length,
-        fetched: 0,
+        fetched: reports.length,
         pending: 0,
-        rateLimited: stillRateLimited.length,
+        rateLimited: 0,
         source: 'ortto_api'
       }
-    };
-
-    // If we have cached data, return it immediately
-    if (cachedReports && cachedReports.reports.length > 0) {
-      logger.info(`Returning ${cachedReports.reports.length} cached reports immediately`);
-      
-      responseData = {
-        reports: cachedReports.reports,
-        pending: cachedReports.missingItems,
-        partial: cachedReports.isPartial,
-        rateLimited: stillRateLimited,
-        message: `Using cached data from ${new Date(cachedReports.reports[0]?.fetchedAt || Date.now()).toLocaleString()}`,
-        summary: {
-          total: validItems.length,
-          fetched: cachedReports.reports.length,
-          pending: cachedReports.missingItems.length,
-          rateLimited: stillRateLimited.length,
-          source: cachedReports.isPartial ? 'partial_cache' : 'firebase_cache'
-        }
-      };
-
-      // If force refresh is requested, we'll still return cached data but fetch fresh data in background
-      if (forceRefresh) {
-        logger.info('Force refresh requested, will fetch fresh data in background');
-        responseData.message += ' (Refreshing in background...)';
-        responseData.summary.source = 'cache_refreshing';
-      }
-    }
-
-    // Send cached response immediately
-    res.json(responseData);
-
-    // If we have missing items or force refresh is requested, fetch them in background
-    const itemsToFetch = forceRefresh ? availableItems : (cachedReports?.missingItems || availableItems);
-    
-    if (itemsToFetch.length > 0) {
-      logger.info(`Background fetching ${itemsToFetch.length} items (${stillRateLimited.length} rate limited)`);
-      
-      // Process items in background (don't await this)
-      processItemsInBackground(userId, itemsToFetch, timeframe, BATCH_LIMIT);
-    }
-
+    });
   } catch (error) {
     logger.error('Error in dashboard-reports endpoint:', {
       error: error.message,
@@ -446,25 +476,20 @@ router.post('/dashboard-reports', verifyToken, async (req, res) => {
 // Background processing function
 const processItemsInBackground = async (userId, items, timeframe, batchLimit) => {
   try {
-    logger.info(`Starting background processing for ${items.length} items`);
-    
+    logger.info(`processItemsInBackground called for user ${userId}, ${items.length} items, timeframe ${timeframe}, batchLimit ${batchLimit}`);
     // Split into batches
     const batches = [];
     for (let i = 0; i < items.length; i += batchLimit) {
       batches.push(items.slice(i, i + batchLimit));
     }
-    
     logger.info(`Processing ${batches.length} batches in background`);
-    
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batchItems = batches[batchIndex];
       logger.info(`Processing background batch ${batchIndex + 1}/${batches.length} with ${batchItems.length} items`);
-      
       const reports = [];
       const rateLimitedReports = [];
       let consecutiveRateLimits = 0;
-      const MAX_CONSECUTIVE_RATE_LIMITS = 3;
-      
+      const MAX_CONSECUTIVE_RATE_LIMITS = 5;
       for (let i = 0; i < batchItems.length; i++) {
         const item = batchItems[i];
         
@@ -494,12 +519,32 @@ const processItemsInBackground = async (userId, items, timeframe, batchLimit) =>
           if (item.type === 'campaign') {
             logger.info(`Background: Fetching campaign report for ${item.id} (${i + 1}/${batchItems.length})`);
             const report = await orttoService.fetchReport(item.id, timeframe);
-            reports.push({ id: item.id, type: 'campaign', ...report });
+            const reportWithId = { id: item.id, type: 'campaign', ...report };
+            reports.push(reportWithId);
+            
+            // Save each report immediately to avoid losing data
+            try {
+              await saveReportsToFirebase(userId, [reportWithId], timeframe);
+              logger.info(`Background: Immediately saved campaign report ${item.id} to Firebase`);
+            } catch (err) {
+              logger.error(`Background: Error saving campaign report ${item.id} to Firebase:`, err);
+            }
+            
             consecutiveRateLimits = 0; // Reset on success
           } else if (item.type === 'journey') {
             logger.info(`Background: Fetching journey report for ${item.id} (${i + 1}/${batchItems.length})`);
             const report = await orttoService.fetchJourneyReport(item.id, timeframe || 'all-time');
-            reports.push({ id: item.id, type: 'journey', ...report });
+            const reportWithId = { id: item.id, type: 'journey', ...report };
+            reports.push(reportWithId);
+            
+            // Save each report immediately to avoid losing data
+            try {
+              await saveReportsToFirebase(userId, [reportWithId], timeframe);
+              logger.info(`Background: Immediately saved journey report ${item.id} to Firebase`);
+            } catch (err) {
+              logger.error(`Background: Error saving journey report ${item.id} to Firebase:`, err);
+            }
+            
             consecutiveRateLimits = 0; // Reset on success
           }
         } catch (error) {
@@ -517,10 +562,12 @@ const processItemsInBackground = async (userId, items, timeframe, batchLimit) =>
               message: 'Rate limited by Ortto API'
             });
             
-            // If we've hit too many consecutive rate limits, stop processing this batch
+            // If we've hit too many consecutive rate limits, wait longer and continue
             if (consecutiveRateLimits >= MAX_CONSECUTIVE_RATE_LIMITS) {
-              logger.warn(`Background: Stopping batch processing due to ${consecutiveRateLimits} consecutive rate limits`);
-              break;
+              logger.warn(`Background: Hit ${consecutiveRateLimits} consecutive rate limits, waiting 60 seconds before continuing`);
+              await new Promise(resolve => setTimeout(resolve, 60000)); // Wait 60 seconds
+              consecutiveRateLimits = 0; // Reset counter
+              continue; // Continue with next item instead of breaking
             }
             
             // For rate limited items, use mock data instead of failing
@@ -614,11 +661,18 @@ const processItemsInBackground = async (userId, items, timeframe, batchLimit) =>
       
       const validReports = reports.filter(report => report !== null && !report.error);
       
-      // Save valid reports to Firebase (accumulative)
-      if (validReports.length > 0) {
-        await saveReportsToFirebase(userId, validReports, timeframe);
-        logger.info(`Background: Saved ${validReports.length} reports to Firebase for batch ${batchIndex + 1}`);
+      // Filter out null reports (e.g., conversions)
+      const filteredReports = validReports.filter(r => r !== null);
+      if (filteredReports.length > 0) {
+        try {
+          await saveReportsToFirebase(userId, filteredReports, timeframe);
+          logger.info(`Background: Saved ${filteredReports.length} reports to Firebase for batch ${batchIndex + 1} (user: ${userId}, timeframe: ${timeframe})`);
+        } catch (err) {
+          logger.error('Background: Error saving reports to Firebase:', err);
+        }
       }
+      
+
       
       // Save rate limited items to Firebase for tracking
       if (rateLimitedReports.length > 0) {
@@ -853,6 +907,52 @@ router.delete('/cache/:timeframe', verifyToken, async (req, res) => {
   }
 });
 
+// Restart background processing for remaining items
+router.post('/restart-background', verifyToken, async (req, res) => {
+  try {
+    const { timeframe = 'all-time' } = req.body;
+    const userId = req.user.uid;
+
+    logger.info(`Restarting background processing for user ${userId}, timeframe: ${timeframe}`);
+
+    // Get all available IDs
+    const idsResponse = await orttoService.listCampaigns();
+    const allItems = [
+      ...idsResponse.campaigns.map(id => ({ id, type: 'campaign' })),
+      ...idsResponse.journeys.map(id => ({ id, type: 'journey' }))
+    ];
+
+    // Get currently cached reports to see what's missing
+    const cachedReports = await getCachedReportsFromFirebase(userId, timeframe);
+    const cachedIds = new Set(cachedReports.map(r => r.id));
+    
+    // Filter out already cached items
+    const remainingItems = allItems.filter(item => !cachedIds.has(item.id));
+    
+    if (remainingItems.length === 0) {
+      return res.json({
+        success: true,
+        message: 'All items already processed',
+        remainingCount: 0
+      });
+    }
+
+    logger.info(`Found ${remainingItems.length} remaining items to process`);
+
+    // Start background processing for remaining items
+    processItemsInBackground(userId, remainingItems, timeframe, 40);
+
+    res.json({
+      success: true,
+      message: `Background processing restarted for ${remainingItems.length} remaining items`,
+      remainingCount: remainingItems.length
+    });
+  } catch (error) {
+    logger.error('Error restarting background processing:', error);
+    res.status(500).json({ error: 'Failed to restart background processing' });
+  }
+});
+
 // Get all cached reports for a user (for data persistence)
 router.get('/cached-reports', verifyToken, async (req, res) => {
   try {
@@ -860,9 +960,10 @@ router.get('/cached-reports', verifyToken, async (req, res) => {
     const userId = req.user.uid;
 
     if (!db) {
+      logger.warn('Firebase not available, returning empty cached reports');
       return res.json({
         reports: [],
-        message: 'Firebase not available',
+        message: 'Firebase not available - data stored locally only',
         count: 0
       });
     }
@@ -890,7 +991,64 @@ router.get('/cached-reports', verifyToken, async (req, res) => {
     }
   } catch (error) {
     logger.error('Error getting cached reports:', error);
-    res.status(500).json({ error: 'Failed to get cached reports' });
+    // Return 200 with empty data instead of 500 error
+    res.json({
+      reports: [],
+      count: 0,
+      message: 'Error accessing cached reports - data stored locally only',
+      error: error.message
+    });
+  }
+});
+
+// Poll for updated cached reports (for background processing updates)
+router.get('/poll-cached-reports', verifyToken, async (req, res) => {
+  try {
+    const { timeframe = 'all-time', lastCount = 0 } = req.query;
+    const userId = req.user.uid;
+
+    if (!db) {
+      return res.json({
+        reports: [],
+        count: 0,
+        hasUpdates: false,
+        message: 'Firebase not available'
+      });
+    }
+
+    const doc = await db.collection('users').doc(userId).collection('reports').doc(timeframe).get();
+    
+    if (doc.exists) {
+      const data = doc.data();
+      const currentCount = data.count || 0;
+      const hasUpdates = currentCount > parseInt(lastCount);
+      
+      res.json({
+        reports: data.reports || [],
+        count: currentCount,
+        hasUpdates,
+        lastUpdated: data.lastUpdated,
+        message: hasUpdates 
+          ? `Found ${currentCount} cached reports (${currentCount - parseInt(lastCount)} new)`
+          : `No new reports (${currentCount} total)`
+      });
+    } else {
+      res.json({
+        reports: [],
+        count: 0,
+        hasUpdates: false,
+        message: 'No cached reports found'
+      });
+    }
+  } catch (error) {
+    logger.error('Error polling cached reports:', error);
+    res.json({
+      reports: [],
+      count: 0,
+      hasUpdates: false,
+      message: 'Error polling cached reports',
+      error: error.message
+    });
   }
 });
 

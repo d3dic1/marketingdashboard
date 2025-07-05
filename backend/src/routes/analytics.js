@@ -259,6 +259,90 @@ router.post('/properties/:propertyId/default', async (req, res) => {
   }
 });
 
+// Debug Ortto data issues
+router.get('/debug-ortto', async (req, res) => {
+  try {
+    if (!analyticsService) {
+      return res.status(500).json({ 
+        error: 'Google Analytics service not configured. Please check your environment variables.',
+        details: 'GOOGLE_APPLICATION_CREDENTIALS is required.',
+        help: 'Make sure you have set the correct service account credentials in your environment variables.'
+      });
+    }
+
+    const { startDate = '30daysAgo', endDate = 'today', propertyId } = req.query;
+    
+    // Use provided propertyId or default property
+    let targetPropertyId = propertyId;
+    if (!targetPropertyId) {
+      const defaultProperty = GA4PropertyService.getDefaultProperty();
+      if (!defaultProperty) {
+        return res.status(400).json({
+          error: 'No GA4 Property configured',
+          details: 'Please add a GA4 Property ID first.',
+          help: 'Use the "Add GA4 Property" button to configure your first property.'
+        });
+      }
+      targetPropertyId = defaultProperty.propertyId;
+    }
+
+    logger.info('Debugging Ortto data issues:', { startDate, endDate, propertyId: targetPropertyId });
+
+    // Get available source/medium combinations
+    const combinations = await analyticsService.discoverSourceMediumCombinations(targetPropertyId, startDate, endDate);
+    
+    // Look for Ortto-related combinations
+    const orttoCombinations = combinations.filter(combo => 
+      combo.sourceMedium.toLowerCase().includes('ortto') ||
+      combo.sourceMedium.toLowerCase().includes('email') ||
+      combo.sourceMedium.toLowerCase().includes('mail')
+    );
+
+    // Try to fetch Ortto data to see what happens
+    let orttoDataResult = null;
+    let orttoError = null;
+    try {
+      orttoDataResult = await analyticsService.fetchOrttoData(startDate, endDate, targetPropertyId);
+    } catch (error) {
+      orttoError = error.message;
+    }
+
+    const debugInfo = {
+      propertyId: targetPropertyId,
+      dateRange: { startDate, endDate },
+      availableSourceMediums: combinations.slice(0, 20), // Top 20
+      orttoRelatedCombinations: orttoCombinations,
+      orttoDataResult: orttoDataResult,
+      orttoError: orttoError,
+      recommendations: []
+    };
+
+    // Generate recommendations
+    if (orttoCombinations.length === 0) {
+      debugInfo.recommendations.push('No Ortto-related source/medium combinations found. Check your tracking setup.');
+      debugInfo.recommendations.push('Common Ortto source/medium values: "ortto / email", "ortto/email", "email"');
+    } else {
+      debugInfo.recommendations.push(`Found ${orttoCombinations.length} Ortto-related combinations. The system should automatically use these.`);
+    }
+
+    if (combinations.length === 0) {
+      debugInfo.recommendations.push('No source/medium combinations found at all. This might indicate a tracking issue.');
+    }
+
+    res.json({
+      success: true,
+      debugInfo,
+      note: 'Use this endpoint to debug Ortto data issues and see what source/medium combinations are available.'
+    });
+  } catch (error) {
+    logger.error('Error debugging Ortto data:', error);
+    res.status(500).json({ 
+      error: 'Failed to debug Ortto data',
+      details: error.message 
+    });
+  }
+});
+
 // Get analytics configuration status
 router.get('/status', async (req, res) => {
   try {

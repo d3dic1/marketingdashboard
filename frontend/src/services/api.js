@@ -18,7 +18,7 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
   // Add timeout and other configurations
-  timeout: 30000,
+  timeout: 60000, // Increase timeout to 60 seconds
 });
 
 // Helper to set the Authorization header with the Firebase token
@@ -33,14 +33,39 @@ export const setAuthToken = (token) => {
 // Central authorized request function
 export async function authorizedRequest(config) {
   const user = auth.currentUser;
-  if (!user) throw new Error('Not authenticated');
+  if (!user) {
+    console.error('No authenticated user found');
+    throw new Error('Not authenticated');
+  }
+  
+  console.log('Getting token for user:', user.email, user.uid);
   let token = await user.getIdToken();
+  
+  // Debug logging
+  console.log('Token details:', {
+    tokenLength: token.length,
+    tokenPrefix: token.substring(0, 20) + '...',
+    tokenSuffix: '...' + token.substring(token.length - 20),
+    parts: token.split('.').length,
+    userUid: user.uid,
+    userEmail: user.email
+  });
+  
+  // Validate token format
+  if (token.split('.').length !== 3) {
+    console.error('Invalid token format - should have 3 parts');
+    throw new Error('Invalid token format');
+  }
+  
   try {
     config.headers = { ...config.headers, Authorization: `Bearer ${token}` };
+    console.log('Making request with token:', config.url);
     return await api(config);
   } catch (err) {
+    console.error('Request failed:', err.response?.status, err.response?.data);
     // If token expired or unauthorized, force refresh and retry once
     if (err.response && (err.response.status === 401 || err.response.status === 403)) {
+      console.log('Token expired, refreshing...');
       token = await user.getIdToken(true);
       config.headers = { ...config.headers, Authorization: `Bearer ${token}` };
       return await api(config);

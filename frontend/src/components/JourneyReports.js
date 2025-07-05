@@ -103,6 +103,13 @@ const JourneyReports = ({ journeyIds = [] }) => {
   const metrics = React.useMemo(() => {
     if (!journeyReports || !Array.isArray(journeyReports.journeys)) return null;
     return journeyReports.journeys.reduce((acc, j) => {
+      // Journey-specific metrics (these are the actual metrics for journeys)
+      acc.totalEntered += Number(j.entered) || 0;
+      acc.totalInJourney += Number(j.in_journey) || 0;
+      acc.totalExited += Number(j.exited) || 0;
+      acc.totalRevenue += Number(j.revenue) || 0;
+      
+      // Email metrics (may be zero for journeys, but include for completeness)
       acc.totalRecipients += Number(j.total_recipients) || 0;
       acc.totalOpens += Number(j.opens) || 0;
       acc.totalClicks += Number(j.clicks) || 0;
@@ -113,6 +120,12 @@ const JourneyReports = ({ journeyIds = [] }) => {
       acc.totalUniqueClicks += Number(j.unique_clicks) || 0;
       return acc;
     }, {
+      // Journey metrics
+      totalEntered: 0,
+      totalInJourney: 0,
+      totalExited: 0,
+      totalRevenue: 0,
+      // Email metrics (may be zero for journeys)
       totalRecipients: 0,
       totalOpens: 0,
       totalClicks: 0,
@@ -124,16 +137,21 @@ const JourneyReports = ({ journeyIds = [] }) => {
     });
   }, [journeyReports]);
 
-  // Top performers (by open rate)
+  // Top performers (by entry rate for journeys)
   const topPerformers = React.useMemo(() => {
     if (!journeyReports || !Array.isArray(journeyReports.journeys)) return [];
     return journeyReports.journeys
       .map(j => ({
         ...j,
-        openRate: j.total_recipients > 0 ? (j.unique_opens / j.total_recipients) * 100 : 0,
-        clickRate: j.opens > 0 ? (j.unique_clicks / j.opens) * 100 : 0,
+        // For journeys, use entry rate instead of open rate
+        entryRate: (j.entered + j.exited) > 0 ? (j.entered / (j.entered + j.exited)) * 100 : 0,
+        retentionRate: j.entered > 0 ? (j.in_journey / j.entered) * 100 : 0,
+        avgRevenue: j.entered > 0 ? (j.revenue / j.entered) : 0,
+        // For TopPerformers component compatibility, map entry rate to open rate and retention rate to click rate
+        openRate: (j.entered + j.exited) > 0 ? (j.entered / (j.entered + j.exited)) * 100 : 0,
+        clickRate: j.entered > 0 ? (j.in_journey / j.entered) * 100 : 0,
       }))
-      .sort((a, b) => b.openRate - a.openRate)
+      .sort((a, b) => b.entryRate - a.entryRate)
       .slice(0, 5);
   }, [journeyReports]);
 
@@ -142,10 +160,10 @@ const JourneyReports = ({ journeyIds = [] }) => {
       {/* Metrics Summary for Journeys */}
       {metrics && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-6 mb-10">
-          <MetricCard title="Total Recipients" value={metrics.totalRecipients} icon={<Users className="text-accent" size={24}/>} />
-          <MetricCard title="Total Opens" value={metrics.totalOpens} icon={<Mail className="text-accent" size={24}/>} />
-          <MetricCard title="Total Clicks" value={metrics.totalClicks} icon={<MousePointerClick className="text-accent" size={24}/>} />
-          <MetricCard title="Total Deliveries" value={metrics.totalDeliveries} icon={<Send className="text-accent" size={24}/>} />
+          <MetricCard title="Total Entered" value={metrics.totalEntered} icon={<Users className="text-accent" size={24}/>} />
+          <MetricCard title="In Journey" value={metrics.totalInJourney} icon={<Mail className="text-accent" size={24}/>} />
+          <MetricCard title="Total Exited" value={metrics.totalExited} icon={<MousePointerClick className="text-accent" size={24}/>} />
+          <MetricCard title="Total Revenue" value={`$${metrics.totalRevenue.toFixed(2)}`} icon={<Send className="text-accent" size={24}/>} />
         </div>
       )}
       {/* Combined Overview for Journeys */}
@@ -157,7 +175,7 @@ const JourneyReports = ({ journeyIds = [] }) => {
       {/* Top Performers for Journeys */}
       {topPerformers.length > 0 && (
         <div className="mb-10">
-          <TopPerformers data={topPerformers} />
+          <TopPerformers data={topPerformers} title="Top Performing Journeys" />
         </div>
       )}
       {/* Header */}
@@ -204,6 +222,9 @@ const JourneyReports = ({ journeyIds = [] }) => {
           <div className="bg-primary-50 border border-primary-200 rounded-xl p-6">
             <p className="text-primary-800 font-semibold">
               Showing data for {journeyReports.total} journey(s) - {timeframe.replace(/-/g, ' ')}
+            </p>
+            <p className="text-primary-700 text-sm mt-2">
+              💡 Journeys are automation workflows that track people entering and exiting the flow. Email metrics may be zero as journeys focus on automation performance rather than email engagement.
             </p>
           </div>
 
@@ -294,6 +315,9 @@ const JourneyReports = ({ journeyIds = [] }) => {
                   </div>
                   
                   <h4 className="text-md font-semibold text-text mb-4">Email Metrics</h4>
+                  <p className="text-text-secondary text-sm mb-4">
+                    Note: Email metrics may be zero for journeys as they are automation workflows, not email campaigns.
+                  </p>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                     <div className="flex justify-between items-center p-4 bg-background rounded-xl">
                       <span className="text-sm font-semibold text-text-secondary">Opens:</span>

@@ -42,20 +42,46 @@ router.get('/reports', async (req, res) => {
     const ids = campaignIds.split(',').map(id => id.trim());
     logger.info('Processing campaign IDs:', ids);
 
-    const reports = await Promise.all(
-      ids.map(async (id) => {
-        try {
-          const report = await orttoService.fetchReport(id, timeframe);
-          const result = { campaignId: id, ...report };
-          return result;
-        } catch (error) {
-          logger.error(`Error fetching report for campaign ${id}:`, error);
-          return { campaignId: id, error: error.message };
-        }
-      })
-    );
+    // Process campaigns in smaller batches to avoid timeouts
+    const BATCH_SIZE = 20;
+    const batches = [];
+    for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+      batches.push(ids.slice(i, i + BATCH_SIZE));
+    }
 
-    const validReports = reports.filter(report => !report.error);
+    const allReports = [];
+    
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      logger.info(`Processing batch ${i + 1}/${batches.length} with ${batch.length} campaigns`);
+      
+      try {
+        const batchReports = await Promise.all(
+          batch.map(async (id) => {
+            try {
+              const report = await orttoService.fetchReport(id, timeframe);
+              const result = { campaignId: id, ...report };
+              return result;
+            } catch (error) {
+              logger.error(`Error fetching report for campaign ${id}:`, error);
+              return { campaignId: id, error: error.message };
+            }
+          })
+        );
+        
+        allReports.push(...batchReports);
+        
+        // Add a small delay between batches to avoid overwhelming the API
+        if (i < batches.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      } catch (batchError) {
+        logger.error(`Error processing batch ${i + 1}:`, batchError);
+        // Continue with other batches even if one fails
+      }
+    }
+
+    const validReports = allReports.filter(report => !report.error);
     if (validReports.length === 0) {
       return res.status(404).json({ error: 'No valid reports found' });
     }

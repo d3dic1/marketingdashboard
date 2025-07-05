@@ -4,10 +4,25 @@ const { logger } = require('../utils/logger');
 class AIService {
   constructor() {
     // Initialize Google Gemini
-    this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    this.model = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    this.model = new GoogleGenerativeAI(process.env.GEMINI_API_KEY).getGenerativeModel({ model: "gemini-1.5-flash" });
 
     logger.info('AI Service initialized with Google Gemini');
+  }
+
+  // Helper method to format prompts for Gemini API
+  formatPromptForGemini(prompt) {
+    if (typeof prompt === 'string') {
+      return { 
+        contents: [{ 
+          role: 'user', 
+          parts: [{ text: prompt }] 
+        }] 
+      };
+    } else if (prompt && prompt.contents) {
+      return prompt;
+    } else {
+      return { contents: [{ role: 'user', parts: [{ text: JSON.stringify(prompt) }] }] };
+    }
   }
 
   // Helper function to extract JSON from AI response
@@ -82,7 +97,7 @@ TARGET AUDIENCE: ${target_audience}
 CAMPAIGN TYPE: ${campaign_type}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const analysis = this.extractJSONFromResponse(response.text());
       
@@ -126,7 +141,7 @@ CAMPAIGN TYPE: ${campaign_type}
 ${historicalData ? `HISTORICAL PERFORMANCE: ${JSON.stringify(historicalData)}` : ''}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const predictions = this.extractJSONFromResponse(response.text());
       
@@ -181,7 +196,7 @@ Original content:
 - Type: ${campaign_type}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const suggestions = this.extractJSONFromResponse(response.text());
       
@@ -216,7 +231,7 @@ Target Audience: ${audience}
 Goals: ${goals}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const ideas = this.extractJSONFromResponse(response.text());
       
@@ -279,7 +294,7 @@ Guidelines:
 Generate copy that is ready to use in email marketing campaigns.
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const copy = this.extractJSONFromResponse(response.text());
       
@@ -353,7 +368,7 @@ Guidelines:
 Generate blog content that provides real value to readers while supporting the campaign goals.
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const blogCopy = this.extractJSONFromResponse(response.text());
       
@@ -443,7 +458,7 @@ Guidelines:
 Generate social media content that will drive engagement and support the campaign objectives.
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const socialMediaPost = this.extractJSONFromResponse(response.text());
       
@@ -502,7 +517,7 @@ Audience Segment: ${audienceSegment}
 Analyze patterns in open rates, click rates, and conversion rates by day of week and time of day.
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const recommendations = this.extractJSONFromResponse(response.text());
       
@@ -576,7 +591,7 @@ Timeframe: ${timeframe} days
 Create a strategic content calendar that aligns with business objectives and industry best practices.
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const calendar = this.extractJSONFromResponse(response.text());
       
@@ -639,7 +654,7 @@ Historical Performance: ${JSON.stringify(historicalPerformance)}
 Focus on tests that have shown the highest impact in similar campaigns and industries.
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const suggestions = this.extractJSONFromResponse(response.text());
       
@@ -703,7 +718,7 @@ Historical Baseline: ${JSON.stringify(historicalBaseline)}
 Identify significant deviations from normal performance patterns and provide actionable insights.
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const anomalies = this.extractJSONFromResponse(response.text());
       
@@ -769,7 +784,7 @@ Product Info: ${productInfo}
 Create a sequence that guides subscribers through a logical journey toward conversion.
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const sequence = this.extractJSONFromResponse(response.text());
       
@@ -804,7 +819,7 @@ LEAD DATA:
 
 Based on this data, provide your prediction.
 `;
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const prediction = this.extractJSONFromResponse(response.text());
 
@@ -859,7 +874,7 @@ Provide email marketing benchmarks. Respond ONLY with valid JSON in this exact f
 Industry: ${industry}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const benchmarks = this.extractJSONFromResponse(response.text());
       
@@ -874,7 +889,19 @@ Industry: ${industry}
 
   async analyzeWithGemini(data, prompt) {
     try {
-      const result = await this.model.generateContent(prompt);
+      let finalPrompt = prompt;
+      
+      // If data is provided, include it in the prompt
+      if (data && typeof data === 'object') {
+        if (typeof prompt === 'string') {
+          finalPrompt = `${prompt}\n\nData: ${JSON.stringify(data, null, 2)}`;
+        } else {
+          finalPrompt = `Data: ${JSON.stringify(data, null, 2)}`;
+        }
+      }
+      
+      const input = this.formatPromptForGemini(finalPrompt);
+      const result = await this.model.generateContent(input);
       const response = await result.response;
       return response.text();
     } catch (error) {
@@ -883,229 +910,7 @@ Industry: ${industry}
     }
   }
 
-  // Audience Intelligence Methods
-  async predictSegments(subscriberData, historicalBehavior) {
-    try {
-      const prompt = `
-Analyze subscriber data and predict high-value segments before they become obvious. Respond ONLY with valid JSON in this exact format:
 
-{
-  "predicted_segments": [
-    {
-      "segment_name": "High-Value Prospects",
-      "confidence_score": 85,
-      "criteria": ["high engagement", "recent activity", "similar to existing customers"],
-      "subscriber_count": 150,
-      "potential_value": "$15,000",
-      "recommended_actions": [
-        "Send personalized onboarding sequence",
-        "Offer exclusive early access",
-        "Assign dedicated account manager"
-      ]
-    }
-  ],
-  "insights": [
-    "Segment A shows 40% higher engagement than average",
-    "Segment B has similar behavior patterns to existing VIP customers"
-  ],
-  "recommendations": [
-    "Create targeted campaigns for predicted segments",
-    "Implement early intervention strategies"
-  ]
-}
-
-Subscriber Data: ${JSON.stringify(subscriberData)}
-Historical Behavior: ${JSON.stringify(historicalBehavior)}
-`;
-
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
-      const segments = this.extractJSONFromResponse(response.text());
-      
-      logger.info('Predictive segmentation completed:', segments);
-      
-      return segments;
-    } catch (error) {
-      logger.error('Error in predictive segmentation:', error);
-      throw new Error('Failed to predict segments');
-    }
-  }
-
-  async predictChurn(subscriberData, engagementHistory, purchaseHistory) {
-    try {
-      const prompt = `
-Predict which subscribers are likely to churn in the next 30 days. Respond ONLY with valid JSON in this exact format:
-
-{
-  "churn_predictions": [
-    {
-      "subscriber_id": "user123",
-      "churn_probability": 78,
-      "risk_level": "high",
-      "warning_signs": [
-        "Decreasing email opens",
-        "No recent purchases",
-        "Reduced website activity"
-      ],
-      "days_to_churn": 15,
-      "recommended_actions": [
-        "Send re-engagement campaign",
-        "Offer personalized discount",
-        "Schedule retention call"
-      ]
-    }
-  ],
-  "overall_churn_rate": "12.5%",
-  "high_risk_count": 45,
-  "medium_risk_count": 120,
-  "low_risk_count": 835,
-  "prevention_strategies": [
-    "Implement win-back campaigns for high-risk subscribers",
-    "Create engagement-based segmentation",
-    "Offer loyalty rewards for at-risk customers"
-  ]
-}
-
-Subscriber Data: ${JSON.stringify(subscriberData)}
-Engagement History: ${JSON.stringify(engagementHistory)}
-Purchase History: ${JSON.stringify(purchaseHistory)}
-`;
-
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
-      const predictions = this.extractJSONFromResponse(response.text());
-      
-      logger.info('Churn prediction completed:', predictions);
-      
-      return predictions;
-    } catch (error) {
-      logger.error('Error in churn prediction:', error);
-      throw new Error('Failed to predict churn');
-    }
-  }
-
-  async calculateEngagementScore(subscriberData, recentActivity) {
-    try {
-      const prompt = `
-Calculate real-time engagement scores for subscribers. Respond ONLY with valid JSON in this exact format:
-
-{
-  "engagement_scores": [
-    {
-      "subscriber_id": "user123",
-      "overall_score": 87,
-      "email_engagement": 92,
-      "website_engagement": 78,
-      "purchase_engagement": 85,
-      "social_engagement": 65,
-      "engagement_level": "high",
-      "trend": "increasing",
-      "recommendations": [
-        "Consider for VIP program",
-        "Target for referral campaign",
-        "Offer early access to new products"
-      ]
-    }
-  ],
-  "score_breakdown": {
-    "high_engagement": 25,
-    "medium_engagement": 45,
-    "low_engagement": 30
-  },
-  "engagement_trends": [
-    "Overall engagement increased 15% this month",
-    "Email engagement highest on Tuesdays and Thursdays"
-  ]
-}
-
-Subscriber Data: ${JSON.stringify(subscriberData)}
-Recent Activity: ${JSON.stringify(recentActivity)}
-`;
-
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
-      const scores = this.extractJSONFromResponse(response.text());
-      
-      logger.info('Engagement scoring completed:', scores);
-      
-      return scores;
-    } catch (error) {
-      logger.error('Error in engagement scoring:', error);
-      throw new Error('Failed to calculate engagement scores');
-    }
-  }
-
-  async developPersonas(subscriberData, behaviorPatterns, demographics) {
-    try {
-      const prompt = `
-Create detailed buyer personas from subscriber data. Respond ONLY with valid JSON in this exact format:
-
-{
-  "personas": [
-    {
-      "persona_name": "Sarah the Early Adopter",
-      "demographics": {
-        "age_range": "25-35",
-        "location": "Urban areas",
-        "income_level": "Middle to upper-middle",
-        "occupation": "Tech professionals"
-      },
-      "behavior_patterns": [
-        "Opens emails within 2 hours",
-        "Makes purchases on mobile",
-        "Engages with new product launches",
-        "Shares content on social media"
-      ],
-      "pain_points": [
-        "Wants latest technology",
-        "Values convenience",
-        "Seeks social proof"
-      ],
-      "motivations": [
-        "Stay ahead of trends",
-        "Save time and effort",
-        "Build social status"
-      ],
-      "preferred_channels": ["Email", "Mobile app", "Social media"],
-      "content_preferences": ["Product launches", "How-to guides", "User testimonials"],
-      "segment_size": 250,
-      "lifetime_value": "$2,500",
-      "recommended_strategies": [
-        "Send early access to new products",
-        "Create mobile-first content",
-        "Encourage social sharing"
-      ]
-    }
-  ],
-  "persona_insights": [
-    "Persona A represents 30% of total subscribers",
-    "Persona B has highest average order value",
-    "Persona C most likely to refer others"
-  ],
-  "targeting_recommendations": [
-    "Create persona-specific email sequences",
-    "Develop targeted content strategies",
-    "Optimize send times per persona"
-  ]
-}
-
-Subscriber Data: ${JSON.stringify(subscriberData)}
-Behavior Patterns: ${JSON.stringify(behaviorPatterns)}
-Demographics: ${JSON.stringify(demographics)}
-`;
-
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
-      const personas = this.extractJSONFromResponse(response.text());
-      
-      logger.info('Persona development completed:', personas);
-      
-      return personas;
-    } catch (error) {
-      logger.error('Error in persona development:', error);
-      throw new Error('Failed to develop personas');
-    }
-  }
 
   // Advanced Analytics Methods
   async detectAnomalies(performanceData, historicalBaseline) {
@@ -1148,7 +953,7 @@ Performance Data: ${JSON.stringify(performanceData)}
 Historical Baseline: ${JSON.stringify(historicalBaseline)}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const anomalies = this.extractJSONFromResponse(response.text());
       
@@ -1211,7 +1016,7 @@ Historical ROI: ${JSON.stringify(historicalROI)}
 Audience Data: ${JSON.stringify(audienceData)}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const prediction = this.extractJSONFromResponse(response.text());
       
@@ -1273,7 +1078,7 @@ Campaign Data: ${JSON.stringify(campaignData)}
 Historical Tests: ${JSON.stringify(historicalTests)}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const suggestions = this.extractJSONFromResponse(response.text());
       
@@ -1331,7 +1136,7 @@ Historical Data: ${JSON.stringify(historicalData)}
 Time Range: ${timeRange}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const trends = this.extractJSONFromResponse(response.text());
       
@@ -1387,7 +1192,7 @@ Campaign Data: ${JSON.stringify(campaignData)}
 Historical Performance: ${JSON.stringify(historicalPerformance)}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const tests = this.extractJSONFromResponse(response.text());
       
@@ -1447,7 +1252,7 @@ Target Audience: ${targetAudience}
 Campaign Goals: ${campaignGoals}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const optimization = this.extractJSONFromResponse(response.text());
       
@@ -1500,7 +1305,7 @@ Target Audience: ${targetAudience}
 Content Type: ${contentType}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const recommendations = this.extractJSONFromResponse(response.text());
       
@@ -1564,7 +1369,7 @@ CTA Data: ${JSON.stringify(ctaData)}
 Conversion Goals: ${conversionGoals}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const optimizations = this.extractJSONFromResponse(response.text());
       
@@ -1626,7 +1431,7 @@ Brand Data: ${JSON.stringify(brandData)}
 Campaign Type: ${campaignType}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const template = this.extractJSONFromResponse(response.text());
       
@@ -1704,7 +1509,7 @@ Theme: ${theme}
 Target Audience: ${targetAudience}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const infographic = this.extractJSONFromResponse(response.text());
       
@@ -1762,7 +1567,7 @@ Target Audience: ${targetAudience}
 Key Message: ${keyMessage}
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const script = this.extractJSONFromResponse(response.text());
       
@@ -1887,7 +1692,7 @@ Guidelines:
 Generate landing page copy that will maximize conversions for the specified goals.
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const landingPageCopy = this.extractJSONFromResponse(response.text());
       
@@ -1994,7 +1799,7 @@ Guidelines:
 Generate a complete, professional blog post that's ready for immediate publishing or manual import.
 `;
 
-      const result = await this.model.generateContent(prompt);
+      const result = await this.model.generateContent(this.formatPromptForGemini(prompt));
       const response = await result.response;
       const blogPost = this.extractJSONFromResponse(response.text());
       
