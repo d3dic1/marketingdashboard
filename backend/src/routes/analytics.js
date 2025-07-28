@@ -2,8 +2,17 @@ const express = require('express');
 const GoogleAnalyticsService = require('../services/googleAnalyticsService');
 const GA4PropertyService = require('../services/ga4PropertyService');
 const { logger } = require('../utils/logger');
+const path = require('path'); // Added for path module
 
 const router = express.Router();
+
+// Test route for LLM analytics
+router.get('/llm-test', (req, res) => {
+  res.json({ 
+    message: 'LLM Analytics test route is working',
+    timestamp: new Date().toISOString()
+  });
+});
 
 // Initialize Google Analytics service
 let analyticsService;
@@ -193,7 +202,7 @@ router.post('/properties', async (req, res) => {
       });
     }
 
-    const newProperty = GA4PropertyService.addProperty(propertyId, label);
+    const newProperty = await GA4PropertyService.addProperty(propertyId, label);
     res.status(201).json(newProperty);
   } catch (error) {
     logger.error('Error adding GA4 property:', error);
@@ -210,7 +219,7 @@ router.put('/properties/:propertyId', async (req, res) => {
     const { propertyId } = req.params;
     const updates = req.body;
 
-    const updatedProperty = GA4PropertyService.updateProperty(propertyId, updates);
+    const updatedProperty = await GA4PropertyService.updateProperty(propertyId, updates);
     res.json(updatedProperty);
   } catch (error) {
     logger.error('Error updating GA4 property:', error);
@@ -226,7 +235,7 @@ router.delete('/properties/:propertyId', async (req, res) => {
   try {
     const { propertyId } = req.params;
 
-    const deletedProperty = GA4PropertyService.deleteProperty(propertyId);
+    const deletedProperty = await GA4PropertyService.deleteProperty(propertyId);
     res.json({ 
       message: 'Property deleted successfully',
       deletedProperty 
@@ -245,7 +254,7 @@ router.post('/properties/:propertyId/default', async (req, res) => {
   try {
     const { propertyId } = req.params;
 
-    const defaultProperty = GA4PropertyService.setDefaultProperty(propertyId);
+    const defaultProperty = await GA4PropertyService.setDefaultProperty(propertyId);
     res.json({ 
       message: 'Default property set successfully',
       defaultProperty 
@@ -254,6 +263,48 @@ router.post('/properties/:propertyId/default', async (req, res) => {
     logger.error('Error setting default GA4 property:', error);
     res.status(400).json({ 
       error: 'Failed to set default GA4 property',
+      details: error.message 
+    });
+  }
+});
+
+// Check for backup files
+router.get('/properties/backups', async (req, res) => {
+  try {
+    const backups = GA4PropertyService.checkBackupFiles();
+    res.json({
+      success: true,
+      backups,
+      message: `Found ${backups.length} backup files`
+    });
+  } catch (error) {
+    logger.error('Error checking backup files:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to check backup files',
+      details: error.message 
+    });
+  }
+});
+
+// Restore from backup
+router.post('/properties/restore/:filename', async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const dataDir = path.dirname(GA4PropertyService.configPath || path.join(__dirname, '../../data/ga4-properties.json'));
+    const backupPath = path.join(dataDir, filename);
+    
+    const restoredProperties = await GA4PropertyService.restoreFromBackup(backupPath);
+    res.json({
+      success: true,
+      properties: restoredProperties,
+      message: 'Properties restored successfully'
+    });
+  } catch (error) {
+    logger.error('Error restoring from backup:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to restore from backup',
       details: error.message 
     });
   }
